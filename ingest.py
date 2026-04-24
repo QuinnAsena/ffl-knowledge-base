@@ -1,0 +1,356 @@
+"""
+ingest.py — Load PDFs, chunk, embed, and store in ChromaDB.
+
+Local mode (default):
+    python ingest.py --project fire
+
+Zotero mode (pulls from a Zotero collection matching the project name):
+    python ingest.py --project fire --zotero
+"""
+
+import argparse
+import hashlib
+import os
+import sys
+from pathlib import Path
+
+import chromadb
+import fitz  # PyMuPDF
+from dotenv import load_dotenv
+from sentence_transformers import SentenceTransformer
+
+load_dotenv()
+
+# ── Config ────────────────────────────────────────────────────────────────────
+
+CHUNK_SIZE = 512
+CHUNK_OVERLAP = 50
+EMBED_MODEL = "all-MiniLM-L6-v2"
+CHROMA_DIR = "chroma_db"
+
+# ── PDF helpers ───────────────────────────────────────────────────────────────
+
+
+def extract_pages(pdf_path: Path) -> list[dict]:
+    """Return [{text, page, filename}] for every non-empty page."""
+    doc = fitz.open(str(pdf_path))
+    pages = []
+    for page_num, page in enumerate(doc, start=1):
+        text = page.get_text("text").strip()
+        if text:
+            pages.append({"text": text, "page": page_num, "filename": pdf_path.name})
+    doc.close()
+    return pages
+
+
+def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
+    """Split text into overlapping word-based chunks."""
+    words = text.split()
+    chunks = []
+    start = 0
+    while start < len(words):
+        chunk = " ".join(words[start : start + chunk_size])
+        if chunk.strip():
+            chunks.append(chunk)
+        if start + chunk_size >= len(words):
+            break
+        start += chunk_size - overlap
+    return chunks
+
+
+def make_chunk_id(filename: str, page: int, chunk_index: int) -> str:
+    """Stable SHA-256 ID — re-ingestion is safe/idempotent."""
+    raw = f"{filename}::p{page}::c{chunk_index}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:32]
+
+
+# ── Source: local PDFs ────────────────────────────────────────────────────────
+
+
+def collect_local_items(project: str) -> list[dict]:
+    """Return item dicts for every PDF in projects/{project}/pdfs/."""
+    pdf_dir = Path("projects") / project / "pdfs"
+    if not pdf_dir.exists():
+        print(f"[error] Directory not found: {pdf_dir}")
+        sys.exit(1)
+
+    pdf_files = sorted(pdf_dir.glob("*.pdf"))
+    if not pdf_files:
+        print(f"[warn] No PDFs found in {pdf_dir}")
+        sys.exit(0)
+
+    print(f"[info] Found {len(pdf_files)} local PDF(s) in {pdf_dir}")
+    return [
+        {
+            "content_type": "pdf",
+            "pdf_path": p,
+            "filename": p.name,
+            "title": "", "author_str": "", "year": "", "doi": "", "url": "",
+        }
+        for p in pdf_files
+    ]
+
+
+# ── Web scraping ─────────────────────────────────────────────────────────────
+
+
+def scrape_web_item(url: str, title: str) -> str | None:
+    """Fetch and extract clean text from a URL using trafilatura."""
+    try:
+        import trafilatura
+        downloaded = trafilatura.fetch_url(url)
+        if not downloaded:
+            return None
+        text = trafilatura.extract(downloaded, include_comments=False, include_tables=True)
+        return text
+    except Exception as e:
+        print(f"  [warn] Scraping failed for {url}: {e}")
+        return None
+
+
+# ── Source: Zotero ────────────────────────────────────────────────────────────
+
+
+def collect_zotero_items(project: str) -> list[dict]:
+    """
+    Pull items from the Zotero collection whose name matches `project` (case-insensitive).
+    Downloads PDFs to projects/{project}/pdfs/ as a local cache.
+    Returns item dicts with enriched metadata.
+    """
+    try:
+        from pyzotero import zotero as pyzotero_lib
+    except ImportError:
+        print("[error] pyzotero not installed. Run: pip install pyzotero")
+        sys.exit(1)
+
+    api_key = os.getenv("ZOTERO_API_KEY")
+    user_id = os.getenv("ZOTERO_USER_ID")
+    library_type = os.getenv("ZOTERO_LIBRARY_TYPE", "user")
+
+    if not api_key or not user_id:
+        print("[error] ZOTERO_API_KEY and ZOTERO_USER_ID must be set in .env")
+        sys.exit(1)
+
+    zot = pyzotero_lib.Zotero(user_id, library_type, api_key)
+
+    # Find collection by name (case-insensitive)
+    all_collections = zot.collections()
+    matches = [c for c in all_collections if c["data"]["name"].lower() == project.lower()]
+
+    if not matches:
+        names = [c["data"]["name"] for c in all_collections]
+        print(f"[error] No Zotero collection named '{project}' found.")
+        print(f"  Available collections: {names}")
+        sys.exit(1)
+
+    if len(matches) > 1:
+        print(f"[warn] Multiple collections named '{project}'; using the first match.")
+
+    col = matches[0]
+    print(f"[info] Zotero collection: '{col['data']['name']}' (key: {col['key']})")
+
+    # Top-level items only — exclude attachments via API, filter notes in code
+    items = [
+        i for i in zot.collection_items(col["key"], itemType="-attachment")
+        if i["data"].get("itemType") != "note"
+    ]
+    print(f"[info] Found {len(items)} item(s) in collection")
+
+    pdf_dir = Path("projects") / project / "pdfs"
+    pdf_dir.mkdir(parents=True, exist_ok=True)
+
+    result = []
+    for item in items:
+        data = item["data"]
+        title = data.get("title", item["key"])
+
+        # Format author string: "Smith et al." or "Smith"
+        authors = [c for c in data.get("creators", []) if c.get("creatorType") == "author"]
+        if not authors:
+            author_str = ""
+        elif len(authors) == 1:
+            author_str = authors[0].get("lastName") or authors[0].get("name", "")
+        else:
+            first = authors[0].get("lastName") or authors[0].get("name", "Unknown")
+            author_str = f"{first} et al."
+
+        year = (data.get("date") or "")[:4]
+        doi = data.get("DOI", "")
+
+        # Find PDF among children
+        children = zot.children(item["key"])
+        pdf_child = next(
+            (c for c in children if c["data"].get("contentType") == "application/pdf"),
+            None,
+        )
+
+        if pdf_child is None:
+            # Fall back to web link if one exists (linked_url or imported_url)
+            web_child = next(
+                (
+                    c for c in children
+                    if c["data"].get("linkMode") in ("linked_url", "imported_url")
+                    or c["data"].get("contentType") == "text/html"
+                ),
+                None,
+            )
+            if web_child is None:
+                print(f"  [skip] No PDF or web link for: {title[:70]}")
+                continue
+
+            url = web_child["data"].get("url", "")
+            if not url:
+                print(f"  [skip] Web link has no URL for: {title[:70]}")
+                continue
+
+            print(f"  [scrape] {title[:60]} — {url}")
+            scraped_text = scrape_web_item(url, title)
+            if not scraped_text or len(scraped_text.split()) < 50:
+                print(f"  [warn] Could not extract usable text from {url}")
+                continue
+
+            result.append(
+                {
+                    "content_type": "web",
+                    "filename": f"{web_child['key']}.web",
+                    "url": url,
+                    "scraped_text": scraped_text,
+                    "title": title,
+                    "author_str": author_str,
+                    "year": year,
+                    "doi": doi,
+                }
+            )
+            continue
+
+        attachment_key = pdf_child["key"]
+        filename = pdf_child["data"].get("filename") or f"{attachment_key}.pdf"
+        dest = pdf_dir / filename
+
+        if dest.exists():
+            print(f"  [cached] {filename}")
+        else:
+            print(f"  [download] {filename}")
+            try:
+                zot.dump(attachment_key, filename, str(pdf_dir))
+            except Exception as e:
+                print(f"  [warn] Download failed for '{filename}': {e}")
+                continue
+
+        result.append(
+            {
+                "content_type": "pdf",
+                "pdf_path": dest,
+                "filename": filename,
+                "url": "",
+                "title": title,
+                "author_str": author_str,
+                "year": year,
+                "doi": doi,
+            }
+        )
+
+    return result
+
+
+# ── Ingestion core ────────────────────────────────────────────────────────────
+
+
+def ingest(project: str, use_zotero: bool = False) -> None:
+    items = collect_zotero_items(project) if use_zotero else collect_local_items(project)
+
+    if not items:
+        print("[warn] No ingestible items found.")
+        sys.exit(0)
+
+    print(f"[info] Loading embedding model: {EMBED_MODEL}")
+    model = SentenceTransformer(EMBED_MODEL)
+
+    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    collection = client.get_or_create_collection(
+        name=project,
+        metadata={"hnsw:space": "cosine"},
+    )
+
+    existing_ids: set[str] = set(collection.get(include=[])["ids"])
+    print(f"[info] Collection '{project}' already has {len(existing_ids)} chunk(s)")
+
+    total_added = 0
+
+    for item in items:
+        print(f"[info] Processing: {item['filename']}")
+        if item.get("author_str") and item.get("year"):
+            print(f"  Metadata: {item['author_str']} ({item['year']}){' — DOI: ' + item['doi'] if item['doi'] else ''}")
+
+        if item.get("content_type") == "web":
+            text = item.get("scraped_text", "")
+            if not text:
+                print(f"  [warn] No scraped text, skipping")
+                continue
+            pages = [{"text": text, "page": 1, "filename": item["filename"]}]
+        else:
+            pages = extract_pages(item["pdf_path"])
+            if not pages:
+                print(f"  [warn] No extractable text, skipping")
+                continue
+
+        item_added = 0
+
+        for page_data in pages:
+            raw_chunks = chunk_text(page_data["text"], CHUNK_SIZE, CHUNK_OVERLAP)
+            ids, documents, embeddings, metadatas = [], [], [], []
+
+            for idx, chunk_val in enumerate(raw_chunks):
+                chunk_id = make_chunk_id(page_data["filename"], page_data["page"], idx)
+                if chunk_id in existing_ids:
+                    continue
+
+                ids.append(chunk_id)
+                documents.append(chunk_val)
+                embeddings.append(model.encode(chunk_val, normalize_embeddings=True).tolist())
+                metadatas.append(
+                    {
+                        "filename": page_data["filename"],
+                        "page": page_data["page"],
+                        "project": project,
+                        "title": item.get("title", ""),
+                        "author_str": item.get("author_str", ""),
+                        "year": item.get("year", ""),
+                        "doi": item.get("doi", ""),
+                        "source_type": item.get("content_type", "pdf"),
+                        "url": item.get("url", ""),
+                    }
+                )
+                existing_ids.add(chunk_id)
+
+            if ids:
+                collection.add(
+                    ids=ids,
+                    documents=documents,
+                    embeddings=embeddings,
+                    metadatas=metadatas,
+                )
+                item_added += len(ids)
+
+        print(f"  -> Added {item_added} new chunk(s)")
+        total_added += item_added
+
+    print(
+        f"\n[done] Ingestion complete. "
+        f"Added {total_added} new chunk(s). "
+        f"Collection '{project}' now has {collection.count()} total chunk(s)."
+    )
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Ingest PDFs into a project knowledge base.")
+    parser.add_argument("--project", required=True, help="Project name (e.g. fire)")
+    parser.add_argument(
+        "--zotero",
+        action="store_true",
+        help="Pull PDFs and metadata from the matching Zotero collection",
+    )
+    args = parser.parse_args()
+    ingest(args.project, use_zotero=args.zotero)

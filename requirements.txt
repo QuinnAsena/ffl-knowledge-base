@@ -1,0 +1,29 @@
+# Anthropic API
+anthropic==0.49.0
+
+# Embeddings (local, no API key needed)
+sentence-transformers==3.4.1
+
+# Vector database
+chromadb==0.6.3
+
+# PDF parsing
+PyMuPDF==1.25.5
+
+# Document loading / chunking
+llama-index-core==0.12.25
+llama-index-readers-file==0.4.5
+llama-index-vector-stores-chroma==0.4.1
+llama-index-embeddings-huggingface==0.5.3
+
+# Web UI
+streamlit==1.44.1
+
+# Zotero integration
+pyzotero==1.5.18
+
+# Web content extraction (used for Zotero web links)
+trafilatura==1.12.2
+
+# Environment
+python-dotenv==1.1.0

@@ -1,0 +1,27 @@
+# Secrets
+.env
+
+# Vector database (rebuild from PDFs)
+chroma_db/
+
+# PDFs — store locally, not in git (can be large)
+projects/*/pdfs/*.pdf
+
+# Chat history — local only
+projects/*/history/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
+Thumbs.db
