@@ -44,6 +44,16 @@ Type your question in the chat box and press Enter. The system will:
 - If evidence is insufficient, it responds: *"I don't have enough information in the provided documents to answer this question."*
 - It will not speculate or extrapolate beyond what the documents state.
 
+- What TOP_K_DRAFT = 12 means
+
+When you submit a question or draft request, the system doesn't send all your documents to Claude — it would be too slow and expensive. Instead:
+
+Your question is converted into a numeric vector (an "embedding" that captures its meaning)
+ChromaDB finds the K chunks whose vectors are most similar to your question's vector
+Only those K chunks are sent to Claude to generate the answer
+TOP_K = 5 for chat queries — 5 most relevant passages is enough to answer a focused question concisely.
+TOP_K_DRAFT = 12 for drafting — when writing a grant section you want broader coverage so Claude can synthesize across more sources, at the cost of a slightly longer, more expensive call.
+
 ---
 
 ## Drafting grant proposal sections (Draft tab)
@@ -111,3 +121,7 @@ Projects are isolated — each has its own literature index. Ask the lab adminis
 
 **Is my conversation saved?**
 Yes. Conversations are automatically saved and accessible in the sidebar for future reference.
+
+## notes to self
+
+`streamlit run app.py`

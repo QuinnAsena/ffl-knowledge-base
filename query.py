@@ -6,8 +6,11 @@ Usage:
 """
 
 import argparse
+import json
 import os
+import re
 import sys
+import time
 
 import anthropic
 import chromadb
@@ -54,6 +57,119 @@ the excerpts.
 6. Output clean markdown. Use paragraph breaks, not bullet points, unless the section type \
 specifically calls for a list (e.g., Objectives or Aims).
 7. Aim for the length and depth appropriate to the section type requested."""
+
+PAPER_SYSTEM_PROMPT = """You are an expert scientific writer assisting with academic manuscript drafting. \
+You will be given excerpts from a project's literature base and a description of the section to write.
+
+Rules:
+1. Write formal academic prose appropriate for a peer-reviewed journal manuscript. Use third person, \
+past tense for methods and results, present tense for established facts and interpretation.
+2. Ground every factual claim in the provided excerpts. Cite inline immediately after the \
+relevant sentence using the reference label in the excerpt header \
+(e.g., [Smith et al. (2023), p. 4] or [Smith et al. (2023) [online]]).
+3. Use appropriately hedged language for interpretation (e.g., "suggest", "indicate", "appear to", \
+"may", "is consistent with"). Reserve strong claims for what the data directly shows.
+4. If the provided literature is insufficient to fully support a point, flag the gap explicitly: \
+**[GAP: insufficient literature on X — consider adding sources]**
+5. Do not fabricate facts, statistics, or citations. Do not use prior knowledge not grounded in \
+the excerpts.
+6. Output clean markdown. Structure the section according to its type (e.g., Introduction builds \
+from broad context to specific gap and hypothesis; Discussion moves from summary of findings to \
+comparison with literature to limitations to implications).
+7. Aim for the length and depth appropriate to the section type and a typical journal manuscript."""
+
+REVIEWER_SYSTEM_PROMPT = """You are an expert academic writing assistant helping researchers respond to peer review. \
+You will be given excerpts from the project's literature base and reviewer comments to respond to.
+
+Rules:
+1. Address each reviewer comment individually. Quote or paraphrase the comment, then write the response.
+2. Acknowledge valid criticisms directly and describe concretely how they will be addressed.
+3. For comments that misrepresent the work, politely and precisely clarify without being dismissive.
+4. Where the literature supports a response, cite relevant excerpts inline \
+(e.g., [Smith et al. (2023), p. 4]). Do not fabricate citations.
+5. If no supporting literature is available for a point, flag it: \
+**[GAP: no supporting literature found — may need additional sources or new data]**
+6. Maintain a professional, collegial tone throughout.
+7. Output clean markdown. Use a clear heading for each reviewer comment."""
+
+GAP_MAP_SYSTEM_PROMPT = """You are an expert research analyst. You will be given excerpts from a \
+project's literature base and a description of the research area to analyse.
+
+Your task is to produce a structured research gap map: a synthesis of what is known, what is \
+contested, and what is missing or understudied.
+
+Rules:
+1. Organise the map under exactly three headings: \
+**Well established**, **Contested or inconsistent**, **Understudied or absent**.
+2. Under each heading, list specific topics or findings as bullet points, citing relevant excerpts \
+inline [Author et al. (YEAR), p. N].
+3. Be specific about gaps — not just "more research is needed" but what type, where, at what \
+scale, or using what methods.
+4. Do not fabricate findings or citations. Do not use prior knowledge not grounded in the excerpts.
+5. If the literature is too limited to map gaps confidently, flag it: \
+**[NOTE: gap map is based on limited literature — add more sources for a fuller picture]**
+6. Output clean markdown with the three headings and bulleted evidence under each."""
+
+ANNOTATION_SYSTEM_PROMPT = """You are a research librarian generating structured annotations for \
+academic papers. You will be given text excerpts from a single paper.
+
+Write a concise structured annotation using exactly these three bold headings:
+
+**What it does:** One to two sentences on the research question, study system, and approach.
+**Key findings:** Two to three sentences on the main results or conclusions.
+**Methods:** One sentence on the primary methodology or data type.
+
+Be precise and objective. Base the annotation only on the provided text. Do not speculate.
+Output only the annotation — no preamble, no closing remarks."""
+
+EXTRACT_SYSTEM_PROMPT = """You are a precise data extraction assistant. Given text excerpts from \
+an academic paper, extract specific fields and return them as a JSON object. \
+Use null for any field not clearly stated in the text. \
+Return ONLY a valid JSON object — no explanation, no markdown fences, no other text."""
+
+THEMES_SYSTEM_PROMPT = """You are a research librarian tagging academic papers with subject themes. \
+Given text excerpts from a paper, return exactly 3 to 5 theme tags that characterise its subject matter.
+
+Guidelines for good tags:
+- 2 to 4 words each, all lowercase
+- Specific enough to be meaningful ("fire ecology" not "ecology")
+- Broad enough to connect related papers ("deep learning methods" not "CNN fire detection v2")
+- Cover both the domain topic and the primary methods where relevant
+
+Return a JSON array of strings only. No other text."""
+
+REFINE_SYSTEM_PROMPT = """You are an expert academic editor. You will receive a draft section and \
+a revision instruction from the author. Revise the draft according to the instruction.
+
+Rules:
+1. Preserve all inline citations from the original draft unless the instruction specifically \
+asks you to remove or replace them.
+2. If the revision introduces new factual claims, flag them: \
+**[UNVERIFIED: this claim needs a citation — check your literature]**
+3. Maintain the writing style and register (grant, manuscript, or outreach) of the original.
+4. Return only the revised draft text — no preamble, no commentary, no explanation of changes.
+5. Output clean markdown."""
+
+OUTREACH_SYSTEM_PROMPT = """You are a science communication writer helping translate research findings \
+for non-specialist audiences. You will be given excerpts from a project's literature base and a \
+description of the piece to write.
+
+Rules:
+1. Write in plain, engaging language accessible to a general or non-specialist audience. \
+Avoid jargon; if a technical term is unavoidable, define it in plain words immediately.
+2. Use active voice and short sentences. Write as if explaining to an interested, intelligent \
+non-scientist — not a child, but not a specialist either.
+3. Ground every factual claim in the provided excerpts. Do not fabricate findings or statistics. \
+Do not use prior knowledge not found in the excerpts.
+4. Citations should be light and integrated naturally into the prose \
+(e.g., "Research by Smith and colleagues found that…" or "A 2023 study showed…") rather than \
+using formal inline citation brackets. Include the author and year so claims remain traceable.
+5. If the provided excerpts don't contain enough material to write a complete, accurate piece, \
+flag what's missing: **[GAP: insufficient material on X — consider adding sources]**
+6. Match the tone and length to the format requested (e.g., a social media post should be punchy \
+and concise; a blog post can be conversational and longer; a press release follows an \
+inverted-pyramid structure with a strong opening sentence).
+7. Output clean markdown."""
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -159,11 +275,17 @@ def query(project: str, question: str) -> tuple[str, list[str]]:
     return message.content[0].text, citations
 
 
-def draft(project: str, prompt: str) -> tuple[str, list[str]]:
+def draft(
+    project: str,
+    prompt: str,
+    system_prompt: str = DRAFT_SYSTEM_PROMPT,
+    top_k: int = TOP_K_DRAFT,
+) -> tuple[str, list[str]]:
     """
-    Generate a grant proposal section draft grounded in the project literature.
+    Generate a written section grounded in the project literature.
 
-    Retrieves TOP_K_DRAFT chunks (more than query()) for broader coverage.
+    system_prompt selects the writing mode (grant, paper, outreach).
+    top_k controls how many chunks are retrieved (default TOP_K_DRAFT).
 
     Returns:
         (draft_text, list_of_citation_strings)
@@ -191,7 +313,7 @@ def draft(project: str, prompt: str) -> tuple[str, list[str]]:
 
     results = collection.query(
         query_embeddings=[q_embedding],
-        n_results=min(TOP_K_DRAFT, collection.count()),
+        n_results=min(top_k, collection.count()),
         include=["documents", "metadatas", "distances"],
     )
 
@@ -206,11 +328,335 @@ def draft(project: str, prompt: str) -> tuple[str, list[str]]:
     message = client_ai.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=2048,
-        system=DRAFT_SYSTEM_PROMPT,
+        system=system_prompt,
         messages=[{"role": "user", "content": build_user_message(prompt, context)}],
     )
 
     return message.content[0].text, citations
+
+
+def _merge_results(
+    projects: list[str], q_embedding: list[float], n_results: int
+) -> dict:
+    """Query multiple collections and return the top n_results chunks by similarity."""
+    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    available = client.list_collections()
+    all_docs, all_metas, all_dists = [], [], []
+
+    for project in projects:
+        if project not in available:
+            continue
+        collection = client.get_collection(name=project)
+        if collection.count() == 0:
+            continue
+        k = min(n_results, collection.count())
+        r = collection.query(
+            query_embeddings=[q_embedding],
+            n_results=k,
+            include=["documents", "metadatas", "distances"],
+        )
+        all_docs.extend(r["documents"][0])
+        all_metas.extend(r["metadatas"][0])
+        all_dists.extend(r["distances"][0])
+
+    if not all_docs:
+        return {"documents": [[]], "metadatas": [[]], "distances": [[]]}
+
+    combined = sorted(zip(all_dists, all_docs, all_metas))[:n_results]
+    return {
+        "documents": [[d for _, d, _ in combined]],
+        "metadatas": [[m for _, _, m in combined]],
+        "distances": [[dist for dist, _, _ in combined]],
+    }
+
+
+def query_multi(projects: list[str], question: str) -> tuple[str, list[str]]:
+    """
+    Query across multiple project collections and synthesise a single answer.
+
+    Merges and re-ranks results from all listed projects before sending to Claude.
+    """
+    if not projects:
+        raise ValueError("At least one project must be specified.")
+
+    model = SentenceTransformer(EMBED_MODEL)
+    q_embedding = model.encode(question, normalize_embeddings=True).tolist()
+    results = _merge_results(projects, q_embedding, TOP_K)
+
+    if not results["documents"][0]:
+        raise ValueError(
+            f"No documents found across projects: {', '.join(projects)}. "
+            "Run ingest.py for each project first."
+        )
+
+    context = format_context(results)
+    citations = format_citations(results)
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
+
+    client_ai = anthropic.Anthropic(api_key=api_key)
+    message = client_ai.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=1024,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": build_user_message(question, context)}],
+    )
+    return message.content[0].text, citations
+
+
+def draft_multi(
+    projects: list[str],
+    prompt: str,
+    system_prompt: str = DRAFT_SYSTEM_PROMPT,
+    top_k: int = TOP_K_DRAFT,
+) -> tuple[str, list[str]]:
+    """
+    Draft a section drawing from multiple project collections.
+
+    Merges and re-ranks results before sending to Claude.
+    """
+    if not projects:
+        raise ValueError("At least one project must be specified.")
+
+    model = SentenceTransformer(EMBED_MODEL)
+    q_embedding = model.encode(prompt, normalize_embeddings=True).tolist()
+    results = _merge_results(projects, q_embedding, top_k)
+
+    if not results["documents"][0]:
+        raise ValueError(
+            f"No documents found across projects: {', '.join(projects)}. "
+            "Run ingest.py for each project first."
+        )
+
+    context = format_context(results)
+    citations = format_citations(results)
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
+
+    client_ai = anthropic.Anthropic(api_key=api_key)
+    message = client_ai.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=2048,
+        system=system_prompt,
+        messages=[{"role": "user", "content": build_user_message(prompt, context)}],
+    )
+    return message.content[0].text, citations
+
+
+def refine_draft(current_draft: str, instruction: str) -> str:
+    """
+    Revise an existing draft according to a plain-language instruction.
+
+    Does not retrieve new chunks — operates on the draft text already in hand.
+    Flags any new claims introduced without a citation.
+
+    Returns:
+        Revised draft text.
+
+    Raises:
+        ValueError: API key not set.
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
+
+    user_msg = f"Current draft:\n\n{current_draft}\n\n---\n\nRevision instruction: {instruction}"
+
+    client_ai = anthropic.Anthropic(api_key=api_key)
+    message = client_ai.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=2048,
+        system=REFINE_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_msg}],
+    )
+    return message.content[0].text
+
+
+def extract_themes(project: str, filename: str) -> list[str]:
+    """
+    Extract 3–5 subject-matter theme tags for one paper using Claude.
+
+    Uses 5 chunks (enough for thematic content; conserves token budget).
+    Retries once after 65 s on a rate-limit error.
+
+    Returns:
+        List of lowercase theme strings, or [] if extraction fails.
+
+    Raises:
+        ValueError: API key not set.
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
+
+    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    collection = client.get_collection(name=project)
+    all_result = collection.get(include=["documents", "metadatas"])
+    indices = [
+        i for i, m in enumerate(all_result["metadatas"])
+        if m.get("filename") == filename
+    ]
+
+    if not indices:
+        return []
+
+    context = "\n\n---\n\n".join(all_result["documents"][i] for i in indices[:5])
+
+    client_ai = anthropic.Anthropic(api_key=api_key)
+    for attempt in range(2):
+        try:
+            message = client_ai.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=100,
+                system=THEMES_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": context}],
+            )
+            break
+        except anthropic.RateLimitError:
+            if attempt == 0:
+                time.sleep(65)
+            else:
+                raise
+
+    raw = message.content[0].text.strip()
+    raw = re.sub(r"^```[a-z]*\n?", "", raw)
+    raw = re.sub(r"\n?```$", "", raw).strip()
+
+    try:
+        themes = json.loads(raw)
+        if isinstance(themes, list):
+            return [str(t).lower().strip() for t in themes[:5] if t]
+    except json.JSONDecodeError:
+        pass
+    return []
+
+
+def annotate_paper(project: str, filename: str) -> str:
+    """
+    Generate a structured annotation (what/findings/methods) for one paper.
+
+    Retrieves up to 15 chunks for the given filename from the project collection.
+
+    Returns:
+        Markdown annotation string.
+
+    Raises:
+        ValueError: collection missing, no chunks for filename, or API key not set.
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
+
+    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    if project not in client.list_collections():
+        raise ValueError(f"No collection found for project '{project}'.")
+
+    collection = client.get_collection(name=project)
+    all_result = collection.get(include=["documents", "metadatas"])
+    indices = [
+        i for i, m in enumerate(all_result["metadatas"])
+        if m.get("filename") == filename
+    ]
+
+    if not indices:
+        raise ValueError(f"No chunks found for '{filename}' in project '{project}'.")
+
+    docs = [all_result["documents"][i] for i in indices[:15]]
+    ref = make_ref(all_result["metadatas"][indices[0]])
+    context = f"Paper: {ref}\n\n" + "\n\n---\n\n".join(docs)
+
+    client_ai = anthropic.Anthropic(api_key=api_key)
+    message = client_ai.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=400,
+        system=ANNOTATION_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": context}],
+    )
+    return message.content[0].text
+
+
+def extract_fields_from_paper(
+    project: str, filename: str, fields: list[str], top_k: int = 5
+) -> dict[str, str]:
+    """
+    Extract specified fields from one paper using Claude and return as a dict.
+
+    Uses up to top_k chunks (default 5 to stay within per-minute token limits).
+    Retries once after 65 s on a rate-limit error.
+    Returns "—" for fields not found in the text.
+
+    Raises:
+        ValueError: API key not set.
+        anthropic.RateLimitError: if rate limit persists after retry.
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
+
+    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    collection = client.get_collection(name=project)
+    all_result = collection.get(include=["documents", "metadatas"])
+    indices = [
+        i for i, m in enumerate(all_result["metadatas"])
+        if m.get("filename") == filename
+    ]
+
+    if not indices:
+        return {f: "—" for f in fields}
+
+    context = "\n\n---\n\n".join(all_result["documents"][i] for i in indices[:top_k])
+    prompt = (
+        f"Extract these fields from the academic paper text below.\n"
+        f"Use these exact key names: {json.dumps(fields)}\n\n"
+        f"Return a JSON object with exactly those keys (preserve case and spacing). "
+        f"Use null for any field not clearly stated in the text.\n\n"
+        f"Paper text:\n{context}"
+    )
+
+    client_ai = anthropic.Anthropic(api_key=api_key)
+    for attempt in range(2):
+        try:
+            message = client_ai.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=512,
+                system=EXTRACT_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            break
+        except anthropic.RateLimitError:
+            if attempt == 0:
+                time.sleep(65)
+            else:
+                raise
+
+    raw = message.content[0].text.strip()
+
+    # Strip markdown code fences Claude sometimes adds despite instructions
+    raw = re.sub(r"^```[a-z]*\n?", "", raw)
+    raw = re.sub(r"\n?```$", "", raw).strip()
+
+    try:
+        extracted = json.loads(raw)
+    except json.JSONDecodeError:
+        # Last resort: find first {...} block in the response
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not match:
+            return {f: "parse error" for f in fields}
+        try:
+            extracted = json.loads(match.group())
+        except json.JSONDecodeError:
+            return {f: "parse error" for f in fields}
+
+    # Case-insensitive key lookup so capitalisation differences don't break results
+    extracted_ci = {k.lower(): v for k, v in extracted.items()}
+    return {
+        f: str(extracted_ci[f.lower()]) if extracted_ci.get(f.lower()) is not None else "—"
+        for f in fields
+    }
 
 
 if __name__ == "__main__":

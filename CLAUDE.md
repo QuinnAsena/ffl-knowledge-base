@@ -9,7 +9,8 @@ A local RAG (Retrieval-Augmented Generation) system for querying academic PDFs a
 - **Vector DB:** ChromaDB — persisted to `chroma_db/` on disk
 - **PDF parsing:** PyMuPDF (`fitz`)
 - **Zotero sync:** `pyzotero` — pulls PDFs + metadata (title, authors, year, DOI) from a named collection; also scrapes Zotero web-link attachments via `trafilatura`
-- **UI:** Streamlit (three tabs: Chat, Documents, Draft)
+- **UI:** Streamlit (five tabs: Chat, Documents, Draft, Extract, Graph)
+- **Graph:** `pyvis` — interactive HTML network, embedded via `st.components.v1.html()`
 - **Secrets:** `python-dotenv` loading from `.env`
 
 ## File map
@@ -17,20 +18,33 @@ A local RAG (Retrieval-Augmented Generation) system for querying academic PDFs a
 ingest.py           PDF → chunk (512 words, 50 overlap) → embed → ChromaDB
                     --zotero flag: pulls from Zotero collection, downloads PDFs, enriches metadata
                     Falls back to trafilatura web scraping for Zotero web-link attachments
-query.py            query(): embed question → retrieve top-5 chunks → Claude → answer + citations
-                    draft(): embed prompt → retrieve top-12 chunks → Claude (prose mode) → draft + citations
-                    DRAFT_SYSTEM_PROMPT instructs Claude to write academic prose and flag literature gaps
+query.py            query() / query_multi()     — retrieve top-5 chunks → Claude → answer + citations
+                    draft() / draft_multi()     — retrieve top-12 chunks → Claude (prose mode)
+                    refine_draft()              — revise existing draft without new retrieval
+                    annotate_paper()            — annotated bibliography entry for one paper
+                    extract_fields_from_paper() — structured field extraction → dict
+                    extract_themes()            — 3–5 theme tags per paper for graph
+                    System prompts: DRAFT_, PAPER_, OUTREACH_, REVIEWER_, GAP_MAP_,
+                                    ANNOTATION_, EXTRACT_, THEMES_, REFINE_SYSTEM_PROMPT
 app.py              Streamlit UI
-                    Tab 1 — Chat: per-project chat, auto-saves history to projects/{name}/history/
-                    Tab 2 — Documents: browsable index from ChromaDB metadata (author, year, DOI, chunks)
-                    Tab 3 — Draft: section type selector, generate button, markdown download
-USER_GUIDE.md       Plain-language guide for lab members (privacy, how citations work, how to get good answers)
+                    Tab 1 — Chat: per-project + cross-project (multi-select), auto-saves history
+                    Tab 2 — Documents: browsable index; per-paper annotation; persisted to annotations.json
+                    Tab 3 — Draft: 5 writing modes; iterative refinement; multi-project; markdown download
+                    Tab 4 — Extract: structured field extraction → table + CSV; persisted to last_extraction.json
+                    Tab 5 — Graph: pyvis theme network; paper (blue) + theme (amber) nodes; persisted to themes.json
+                    Sidebar: retrieval_k slider (5–25, default 12) for Draft & Extract
+USER_GUIDE.md       Plain-language guide for lab members
+RUNBOOK.md          Personal quick reference — run commands, common problems, file paths
 projects/
   {name}/
     pdfs/           PDFs cached here (by Zotero download or manual drop)
     history/        Auto-saved conversations as JSON (gitignored)
+    annotations.json  Persisted annotated bibliography entries
+    last_extraction.json  Persisted last structured extraction (fields + results)
+    themes.json     Persisted theme tags per paper (used by Graph tab)
 chroma_db/          Auto-created on first ingest; gitignored; one collection per project
 .env                ANTHROPIC_API_KEY, ZOTERO_API_KEY, ZOTERO_USER_ID, ZOTERO_LIBRARY_TYPE
+.env.example        Template committed to git — copy to .env on new deployments
 ```
 
 ## Key conventions
@@ -88,8 +102,16 @@ Files, embeddings, and chat history stay local. Factor this in for embargoed pap
 - Zotero web-link scraping via trafilatura (curated sources only, not general URL ingestion)
 - Chat history auto-save/reload (JSON per session in projects/{name}/history/)
 - Browsable document index (Documents tab — title, authors, year, DOI, chunk count)
-- Grant proposal drafting mode (Draft tab — 12 chunks, prose system prompt, gap flagging, markdown download)
+- Annotated bibliography — per-paper annotations generated on demand; persisted to annotations.json
+- 5 writing modes in Draft tab: Grant Proposal, Academic Paper, Outreach & Communication, Response to Reviewers, Research Gap Map
+- Iterative draft refinement — REFINE_SYSTEM_PROMPT revises existing draft without new retrieval
+- Structured extraction (Extract tab) — user-defined fields → table + CSV download; persisted to last_extraction.json
+- Cross-project synthesis — query_multi / draft_multi merge ChromaDB collections; UI multi-select in Chat and Draft
+- Theme graph (Graph tab) — Claude tags each paper; pyvis bipartite network; theme nodes sized by degree; persisted to themes.json
+- Retrieval depth slider (sidebar) — controls top-k for Draft and Extract (5–25, default 12)
+- File-based persistence for annotations, extractions, and themes — survive Streamlit restart
 - Multi-project isolation confirmed with Fire and Alaska projects
+- Rate-limit handling — 65 s retry on 429; 7 s inter-paper sleep in Extract and Graph tabs
 
 ## Hosting plan
 - Deploy to lab server + Cloudflare Tunnel + Cloudflare Access

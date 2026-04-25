@@ -251,6 +251,20 @@ ZOTERO_LIBRARY_TYPE=user    # or "group"
 
 ---
 
+## Future features
+
+### Backlog (not yet scoped)
+- **Figure caption writer** — describe a figure, get a publication-quality caption in the style of the current manuscript section.
+- **Email and letter drafts** — same outreach mode but for professional correspondence: grant inquiry letters, collaboration proposals, cover letters.
+- **Literature review outline** — given a research question, generate a thematic outline for a review paper with suggested section headings and papers mapped to each.
+- **Systematic review assistant** — guided workflow: define inclusion/exclusion criteria → Claude screens abstracts → extracts data → drafts synthesis section. Essentially a mini-SR pipeline.
+- **OCR support** — scanned PDFs are currently skipped with a warning. Add OCR via `pytesseract` or `pymupdf` with OCR backend so image-only PDFs can be ingested.
+- **Per-project config file** — `projects/{name}/config.json` to override chunk size, overlap, and top-k defaults per project without touching code.
+- **Cross-session conversation memory** — summarise past chat sessions and carry a compressed context forward so Claude "remembers" earlier discussions within a project.
+- **Surface un-ingested Zotero papers** — in the Documents tab, show papers present in Zotero but not yet in ChromaDB, with a one-click ingest button.
+
+---
+
 ## Architecture decisions record
 
 **Why not LlamaIndex?**
