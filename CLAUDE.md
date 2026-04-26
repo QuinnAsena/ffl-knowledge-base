@@ -9,7 +9,7 @@ A local RAG (Retrieval-Augmented Generation) system for querying academic PDFs a
 - **Vector DB:** ChromaDB — persisted to `chroma_db/` on disk
 - **PDF parsing:** PyMuPDF (`fitz`)
 - **Zotero sync:** `pyzotero` — pulls PDFs + metadata (title, authors, year, DOI) from a named collection; also scrapes Zotero web-link attachments via `trafilatura`
-- **UI:** Streamlit (five tabs: Chat, Documents, Draft, Extract, Graph)
+- **UI:** Streamlit (seven tabs: Chat, Documents, Draft, Extract, Graph, Guide, Write)
 - **Graph:** `pyvis` — interactive HTML network, embedded via `st.components.v1.html()`
 - **Secrets:** `python-dotenv` loading from `.env`
 
@@ -24,24 +24,36 @@ query.py            query() / query_multi()     — retrieve top-5 chunks → Cl
                     annotate_paper()            — annotated bibliography entry for one paper
                     extract_fields_from_paper() — structured field extraction → dict
                     extract_themes()            — 3–5 theme tags per paper for graph
+                    assist_writing()            — RAG + Claude collaborator for Write tab
+                    assist_writing_multi()      — multi-project variant
                     System prompts: DRAFT_, PAPER_, OUTREACH_, REVIEWER_, GAP_MAP_,
-                                    ANNOTATION_, EXTRACT_, THEMES_, REFINE_SYSTEM_PROMPT
+                                    ANNOTATION_, EXTRACT_, THEMES_, REFINE_, ASSIST_SYSTEM_PROMPT
 app.py              Streamlit UI
                     Tab 1 — Chat: per-project + cross-project (multi-select), auto-saves history
                     Tab 2 — Documents: browsable index; per-paper annotation; persisted to annotations.json
                     Tab 3 — Draft: 5 writing modes; iterative refinement; multi-project; markdown download
                     Tab 4 — Extract: structured field extraction → table + CSV; persisted to last_extraction.json
                     Tab 5 — Graph: pyvis theme network; paper (blue) + theme (amber) nodes; persisted to themes.json
-                    Sidebar: retrieval_k slider (5–25, default 12) for Draft & Extract
+                    Tab 6 — Guide: renders USER_GUIDE.md inline
+                    Tab 7 — Write: split-pane markdown editor + live preview; AI assistance (Find
+                             citations, Refine, Challenge, Expand, Custom); writing context brief;
+                             template library; per-project draft persistence; version snapshots;
+                             append-only notes history; DOCX export (pandoc); external file sync
+                    Sidebar: retrieval_k slider (5–25, default 12) for Draft, Extract & Write
 USER_GUIDE.md       Plain-language guide for lab members
 RUNBOOK.md          Personal quick reference — run commands, common problems, file paths
 projects/
   {name}/
-    pdfs/           PDFs cached here (by Zotero download or manual drop)
-    history/        Auto-saved conversations as JSON (gitignored)
-    annotations.json  Persisted annotated bibliography entries
+    pdfs/               PDFs cached here (by Zotero download or manual drop)
+    history/            Auto-saved conversations as JSON (gitignored)
+    annotations.json    Persisted annotated bibliography entries
     last_extraction.json  Persisted last structured extraction (fields + results)
-    themes.json     Persisted theme tags per paper (used by Graph tab)
+    themes.json         Persisted theme tags per paper (used by Graph tab)
+    write_draft.md      Auto-saved Write tab draft (created by "Save draft" button)
+    write_context.md    Writing brief — injected into every Write tab AI call
+    write_notes.md      Append-only AI suggestion history from Write tab
+    write_config.json   Write tab config (external_file path)
+    write_snapshots/    Timestamped draft snapshots before each AI call (last 20 kept)
 chroma_db/          Auto-created on first ingest; gitignored; one collection per project
 .env                ANTHROPIC_API_KEY, ZOTERO_API_KEY, ZOTERO_USER_ID, ZOTERO_LIBRARY_TYPE
 .env.example        Template committed to git — copy to .env on new deployments
@@ -112,6 +124,11 @@ Files, embeddings, and chat history stay local. Factor this in for embargoed pap
 - File-based persistence for annotations, extractions, and themes — survive Streamlit restart
 - Multi-project isolation confirmed with Fire and Alaska projects
 - Rate-limit handling — 65 s retry on 429; 7 s inter-paper sleep in Extract and Graph tabs
+- Advanced settings sidebar — model selector (Haiku/Sonnet/Opus), temperature slider, max draft tokens, retrieval-k, show-scores toggle
+- Retrieval confidence scores — cosine similarity returned alongside citations; optionally shown in Chat source expander
+- Guide tab — renders USER_GUIDE.md inline; covers all tabs and advanced features
+- Temperature defaults: 0.3 for Q&A, 0.4 for drafting (API default is 1.0 — these defaults are a meaningful quality improvement)
+- Write tab (Assisted Draft) — split-pane markdown editor + AI assistance (Find citations, Refine, Challenge, Expand, Custom modes); writing context brief injected into all calls; 8-entry template library; per-project draft auto-save; version snapshots before AI calls; append-only notes history; "Append to draft" button; DOCX export via pandoc; external file sync (network drive read/write with companion .notes.md)
 
 ## Hosting plan
 - Deploy to lab server + Cloudflare Tunnel + Cloudflare Access

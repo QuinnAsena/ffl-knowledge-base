@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import time
+from functools import lru_cache
 
 import anthropic
 import chromadb
@@ -128,15 +129,25 @@ Use null for any field not clearly stated in the text. \
 Return ONLY a valid JSON object — no explanation, no markdown fences, no other text."""
 
 THEMES_SYSTEM_PROMPT = """You are a research librarian tagging academic papers with subject themes. \
-Given text excerpts from a paper, return exactly 3 to 5 theme tags that characterise its subject matter.
+Given text excerpts from a paper, identify 3 to 4 themes that characterise its subject matter \
+and rate how central each theme is to the paper.
+
+Return a JSON object where:
+- Keys are theme tags (2–4 words, all lowercase)
+- Values are relevance scores from 0.1 (minor mention) to 1.0 (core focus of the paper)
+
+Example: {"fire ecology": 0.9, "remote sensing methods": 0.7, "land use change": 0.4}
 
 Guidelines for good tags:
-- 2 to 4 words each, all lowercase
-- Specific enough to be meaningful ("fire ecology" not "ecology")
-- Broad enough to connect related papers ("deep learning methods" not "CNN fire detection v2")
-- Cover both the domain topic and the primary methods where relevant
+- Use broad disciplinary terms, not paper-specific details.
+  Good: "fire ecology", "remote sensing methods", "soil carbon cycling"
+  Bad:  "sub-arctic fire regime 1980–2010", "CNN wildfire detection", "permafrost thaw rate study"
+- Imagine the tag will be shared by 3–5 papers in the same research collection.
+  If a tag could only describe this one paper, it is too specific — broaden it one level.
+- Cover both the domain topic and the primary method where relevant.
+- Return exactly 3–4 themes (not 5).
 
-Return a JSON array of strings only. No other text."""
+Return ONLY the JSON object. No other text."""
 
 REFINE_SYSTEM_PROMPT = """You are an expert academic editor. You will receive a draft section and \
 a revision instruction from the author. Revise the draft according to the instruction.
@@ -149,6 +160,30 @@ asks you to remove or replace them.
 3. Maintain the writing style and register (grant, manuscript, or outreach) of the original.
 4. Return only the revised draft text — no preamble, no commentary, no explanation of changes.
 5. Output clean markdown."""
+
+ASSIST_SYSTEM_PROMPT = """You are a research collaborator reviewing a draft in progress. \
+The author has requested specific help. Suggest, highlight gaps, or add citations — \
+do not rewrite the entire document unless the instruction explicitly says so.
+
+Rules:
+1. Base all suggestions on the provided document excerpts. Do not use prior knowledge.
+2. Respond according to the requested mode:
+   - Find citations: Identify claims in the draft that can be supported by the literature. \
+For each, quote the claim and provide the citation [Author et al. (YEAR), p. N].
+   - Refine: Suggest specific wording improvements for clarity or precision. \
+Quote the original phrase, then offer a revised version.
+   - Challenge: Identify claims that appear unsupported or that overstep the evidence \
+in the provided excerpts. Quote each problematic claim and explain the concern.
+   - Expand: Identify points that could be developed further using the available literature \
+and draft 1–2 additional sentences for each, with citations.
+3. Format your response as a numbered list of specific, actionable suggestions.
+4. If the literature is insufficient to assist, say so explicitly rather than guessing."""
+
+MEMORY_SYSTEM_PROMPT = """You are a research assistant summarising a past conversation. \
+Given an exchange between a researcher and an assistant, write a 2–3 sentence summary \
+capturing the research questions explored and the key conclusions or findings discussed. \
+Be specific — name methods, species, regions, or findings mentioned. \
+Output only the summary, no preamble or closing remarks."""
 
 OUTREACH_SYSTEM_PROMPT = """You are a science communication writer helping translate research findings \
 for non-specialist audiences. You will be given excerpts from a project's literature base and a \
@@ -220,15 +255,72 @@ def format_citations(results: dict) -> list[str]:
     return citations
 
 
+def format_citations_and_scores(results: dict) -> tuple[list[str], list[float]]:
+    """Return deduplicated citations paired with their best cosine similarity score.
+
+    Score = 1 - cosine_distance, range 0–1 (higher = more similar to the query).
+    Only the first (best-ranked) occurrence of each reference is kept.
+    """
+    seen: dict[str, float] = {}
+    for meta, dist in zip(results["metadatas"][0], results["distances"][0]):
+        ref = make_ref(meta)
+        if ref not in seen:
+            seen[ref] = round(1 - float(dist), 2)
+    return list(seen.keys()), list(seen.values())
+
+
+# ── Embedding model (cached — loaded once per process) ───────────────────────
+
+
+@lru_cache(maxsize=1)
+def _get_embed_model() -> SentenceTransformer:
+    return SentenceTransformer(EMBED_MODEL)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
-def query(project: str, question: str) -> tuple[str, list[str]]:
+def summarise_conversation(messages: list) -> str:
+    """Generate a 2–3 sentence summary of a conversation for cross-session memory.
+
+    Raises:
+        ValueError: API key not set.
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
+
+    convo_text = "\n".join(
+        f"{'Researcher' if m['role'] == 'user' else 'Assistant'}: {m['content'][:600]}"
+        for m in messages
+        if m.get("role") in ("user", "assistant")
+    )
+
+    client_ai = anthropic.Anthropic(api_key=api_key)
+    message = client_ai.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=200,
+        temperature=0.3,
+        system=MEMORY_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": convo_text}],
+    )
+    return message.content[0].text.strip()
+
+
+def query(
+    project: str,
+    question: str,
+    prior_context: str = "",
+    model: str = CLAUDE_MODEL,
+    temperature: float = 0.3,
+    max_tokens: int = 1024,
+) -> tuple[str, list[str], list[float]]:
     """
     Run a RAG query against a project collection.
 
     Returns:
-        (answer_text, list_of_citation_strings)
+        (answer_text, citation_strings, similarity_scores)
+        similarity_scores align with citation_strings; range 0–1 (higher = better match).
 
     Raises:
         ValueError: collection missing/empty, or API key not set.
@@ -248,8 +340,8 @@ def query(project: str, question: str) -> tuple[str, list[str]]:
             f"Run `python ingest.py --project {project}` first."
         )
 
-    model = SentenceTransformer(EMBED_MODEL)
-    q_embedding = model.encode(question, normalize_embeddings=True).tolist()
+    embed_model = _get_embed_model()
+    q_embedding = embed_model.encode(question, normalize_embeddings=True).tolist()
 
     results = collection.query(
         query_embeddings=[q_embedding],
@@ -258,21 +350,28 @@ def query(project: str, question: str) -> tuple[str, list[str]]:
     )
 
     context = format_context(results)
-    citations = format_citations(results)
+    citations, scores = format_citations_and_scores(results)
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         raise ValueError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
 
+    system = (
+        f"Prior context from earlier research sessions:\n{prior_context}\n\n---\n\n{SYSTEM_PROMPT}"
+        if prior_context
+        else SYSTEM_PROMPT
+    )
+
     client_ai = anthropic.Anthropic(api_key=api_key)
     message = client_ai.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=1024,
-        system=SYSTEM_PROMPT,
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        system=system,
         messages=[{"role": "user", "content": build_user_message(question, context)}],
     )
 
-    return message.content[0].text, citations
+    return message.content[0].text, citations, scores
 
 
 def draft(
@@ -280,6 +379,9 @@ def draft(
     prompt: str,
     system_prompt: str = DRAFT_SYSTEM_PROMPT,
     top_k: int = TOP_K_DRAFT,
+    model: str = CLAUDE_MODEL,
+    temperature: float = 0.4,
+    max_tokens: int = 2048,
 ) -> tuple[str, list[str]]:
     """
     Generate a written section grounded in the project literature.
@@ -308,8 +410,8 @@ def draft(
             f"Run `python ingest.py --project {project}` first."
         )
 
-    model = SentenceTransformer(EMBED_MODEL)
-    q_embedding = model.encode(prompt, normalize_embeddings=True).tolist()
+    embed_model = _get_embed_model()
+    q_embedding = embed_model.encode(prompt, normalize_embeddings=True).tolist()
 
     results = collection.query(
         query_embeddings=[q_embedding],
@@ -326,8 +428,9 @@ def draft(
 
     client_ai = anthropic.Anthropic(api_key=api_key)
     message = client_ai.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=2048,
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
         system=system_prompt,
         messages=[{"role": "user", "content": build_user_message(prompt, context)}],
     )
@@ -370,7 +473,14 @@ def _merge_results(
     }
 
 
-def query_multi(projects: list[str], question: str) -> tuple[str, list[str]]:
+def query_multi(
+    projects: list[str],
+    question: str,
+    prior_context: str = "",
+    model: str = CLAUDE_MODEL,
+    temperature: float = 0.3,
+    max_tokens: int = 1024,
+) -> tuple[str, list[str], list[float]]:
     """
     Query across multiple project collections and synthesise a single answer.
 
@@ -379,8 +489,8 @@ def query_multi(projects: list[str], question: str) -> tuple[str, list[str]]:
     if not projects:
         raise ValueError("At least one project must be specified.")
 
-    model = SentenceTransformer(EMBED_MODEL)
-    q_embedding = model.encode(question, normalize_embeddings=True).tolist()
+    embed_model = _get_embed_model()
+    q_embedding = embed_model.encode(question, normalize_embeddings=True).tolist()
     results = _merge_results(projects, q_embedding, TOP_K)
 
     if not results["documents"][0]:
@@ -390,20 +500,27 @@ def query_multi(projects: list[str], question: str) -> tuple[str, list[str]]:
         )
 
     context = format_context(results)
-    citations = format_citations(results)
+    citations, scores = format_citations_and_scores(results)
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         raise ValueError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
 
+    system = (
+        f"Prior context from earlier research sessions:\n{prior_context}\n\n---\n\n{SYSTEM_PROMPT}"
+        if prior_context
+        else SYSTEM_PROMPT
+    )
+
     client_ai = anthropic.Anthropic(api_key=api_key)
     message = client_ai.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=1024,
-        system=SYSTEM_PROMPT,
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        system=system,
         messages=[{"role": "user", "content": build_user_message(question, context)}],
     )
-    return message.content[0].text, citations
+    return message.content[0].text, citations, scores
 
 
 def draft_multi(
@@ -411,6 +528,9 @@ def draft_multi(
     prompt: str,
     system_prompt: str = DRAFT_SYSTEM_PROMPT,
     top_k: int = TOP_K_DRAFT,
+    model: str = CLAUDE_MODEL,
+    temperature: float = 0.4,
+    max_tokens: int = 2048,
 ) -> tuple[str, list[str]]:
     """
     Draft a section drawing from multiple project collections.
@@ -420,8 +540,8 @@ def draft_multi(
     if not projects:
         raise ValueError("At least one project must be specified.")
 
-    model = SentenceTransformer(EMBED_MODEL)
-    q_embedding = model.encode(prompt, normalize_embeddings=True).tolist()
+    embed_model = _get_embed_model()
+    q_embedding = embed_model.encode(prompt, normalize_embeddings=True).tolist()
     results = _merge_results(projects, q_embedding, top_k)
 
     if not results["documents"][0]:
@@ -439,8 +559,9 @@ def draft_multi(
 
     client_ai = anthropic.Anthropic(api_key=api_key)
     message = client_ai.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=2048,
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
         system=system_prompt,
         messages=[{"role": "user", "content": build_user_message(prompt, context)}],
     )
@@ -470,21 +591,24 @@ def refine_draft(current_draft: str, instruction: str) -> str:
     message = client_ai.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=2048,
+        temperature=0.3,
         system=REFINE_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_msg}],
     )
     return message.content[0].text
 
 
-def extract_themes(project: str, filename: str) -> list[str]:
+def extract_themes(project: str, filename: str, model: str = CLAUDE_MODEL) -> dict[str, float]:
     """
-    Extract 3–5 subject-matter theme tags for one paper using Claude.
+    Extract 3–5 subject-matter themes with relevance scores for one paper.
 
+    Returns a dict mapping lowercase theme tag → relevance score (0.1–1.0),
+    where 1.0 means the theme is a core focus of the paper.
     Uses 5 chunks (enough for thematic content; conserves token budget).
     Retries once after 65 s on a rate-limit error.
 
     Returns:
-        List of lowercase theme strings, or [] if extraction fails.
+        {theme: score} dict, or {} if extraction fails.
 
     Raises:
         ValueError: API key not set.
@@ -502,16 +626,18 @@ def extract_themes(project: str, filename: str) -> list[str]:
     ]
 
     if not indices:
-        return []
+        return {}
 
     context = "\n\n---\n\n".join(all_result["documents"][i] for i in indices[:5])
 
     client_ai = anthropic.Anthropic(api_key=api_key)
+    message = None
     for attempt in range(2):
         try:
             message = client_ai.messages.create(
-                model=CLAUDE_MODEL,
+                model=model,
                 max_tokens=100,
+                temperature=0.3,
                 system=THEMES_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": context}],
             )
@@ -522,17 +648,28 @@ def extract_themes(project: str, filename: str) -> list[str]:
             else:
                 raise
 
+    if message is None:
+        return {}
     raw = message.content[0].text.strip()
     raw = re.sub(r"^```[a-z]*\n?", "", raw)
     raw = re.sub(r"\n?```$", "", raw).strip()
 
     try:
-        themes = json.loads(raw)
-        if isinstance(themes, list):
-            return [str(t).lower().strip() for t in themes[:5] if t]
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            result = {}
+            for k, v in list(parsed.items())[:5]:
+                try:
+                    result[str(k).lower().strip()] = max(0.1, min(1.0, float(v)))
+                except (TypeError, ValueError):
+                    result[str(k).lower().strip()] = 0.5
+            return result
+        if isinstance(parsed, list):
+            # Fallback: old-format list response — treat all weights as 0.5
+            return {str(t).lower().strip(): 0.5 for t in parsed[:5] if t}
     except json.JSONDecodeError:
         pass
-    return []
+    return {}
 
 
 def annotate_paper(project: str, filename: str) -> str:
@@ -618,11 +755,13 @@ def extract_fields_from_paper(
     )
 
     client_ai = anthropic.Anthropic(api_key=api_key)
+    message = None
     for attempt in range(2):
         try:
             message = client_ai.messages.create(
                 model=CLAUDE_MODEL,
                 max_tokens=512,
+                temperature=0.0,
                 system=EXTRACT_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -633,6 +772,8 @@ def extract_fields_from_paper(
             else:
                 raise
 
+    if message is None:
+        return {f: "—" for f in fields}
     raw = message.content[0].text.strip()
 
     # Strip markdown code fences Claude sometimes adds despite instructions
@@ -659,6 +800,164 @@ def extract_fields_from_paper(
     }
 
 
+def assist_writing(
+    project: str,
+    document_text: str,
+    mode: str,
+    custom_instruction: str = "",
+    writing_context: str = "",
+    top_k: int = TOP_K_DRAFT,
+    model: str = CLAUDE_MODEL,
+    temperature: float = 0.4,
+    max_tokens: int = 1024,
+) -> tuple[str, list[str], list[float]]:
+    """
+    Provide AI assistance on a draft in progress.
+
+    Retrieves relevant chunks using the first 500 characters of the draft as a query,
+    then asks Claude to assist according to the specified mode.
+
+    mode: "Find citations" | "Refine" | "Challenge" | "Expand" | "Custom"
+    custom_instruction: used when mode is "Custom"
+
+    Returns:
+        (response_text, citations, scores) — same shape as query().
+
+    Raises:
+        ValueError: collection missing/empty or API key not set.
+    """
+    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    existing = client.list_collections()
+    if project not in existing:
+        raise ValueError(
+            f"No collection found for project '{project}'. "
+            f"Run `python ingest.py --project {project}` first."
+        )
+
+    collection = client.get_collection(name=project)
+    if collection.count() == 0:
+        raise ValueError(
+            f"Collection '{project}' is empty. "
+            f"Run `python ingest.py --project {project}` first."
+        )
+
+    embed_model = _get_embed_model()
+    query_text = document_text[:500] if document_text.strip() else mode
+    q_embedding = embed_model.encode(query_text, normalize_embeddings=True).tolist()
+
+    results = collection.query(
+        query_embeddings=[q_embedding],
+        n_results=min(top_k, collection.count()),
+        include=["documents", "metadatas", "distances"],
+    )
+
+    context = format_context(results)
+    citations, scores = format_citations_and_scores(results)
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
+
+    instruction = custom_instruction.strip() if mode == "Custom" and custom_instruction.strip() else mode
+    context_block = (
+        f"Writing brief (author-supplied context about this document):\n{writing_context}\n\n---\n\n"
+        if writing_context.strip() else ""
+    )
+    user_msg = (
+        f"{context_block}"
+        f"Assistance mode: {instruction}\n\n"
+        f"Author's current draft:\n\n{document_text}\n\n"
+        f"---\n\nDocument excerpts from the literature:\n\n{context}"
+    )
+
+    client_ai = anthropic.Anthropic(api_key=api_key)
+    for attempt in range(2):
+        try:
+            message = client_ai.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=ASSIST_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_msg}],
+            )
+            break
+        except anthropic.RateLimitError:
+            if attempt == 0:
+                time.sleep(65)
+            else:
+                raise
+    return message.content[0].text, citations, scores
+
+
+def assist_writing_multi(
+    projects: list[str],
+    document_text: str,
+    mode: str,
+    custom_instruction: str = "",
+    writing_context: str = "",
+    top_k: int = TOP_K_DRAFT,
+    model: str = CLAUDE_MODEL,
+    temperature: float = 0.4,
+    max_tokens: int = 1024,
+) -> tuple[str, list[str], list[float]]:
+    """
+    Provide AI writing assistance drawing from multiple project collections.
+
+    Returns:
+        (response_text, citations, scores)
+    """
+    if not projects:
+        raise ValueError("At least one project must be specified.")
+
+    embed_model = _get_embed_model()
+    query_text = document_text[:500] if document_text.strip() else mode
+    q_embedding = embed_model.encode(query_text, normalize_embeddings=True).tolist()
+    results = _merge_results(projects, q_embedding, top_k)
+
+    if not results["documents"][0]:
+        raise ValueError(
+            f"No documents found across projects: {', '.join(projects)}. "
+            "Run ingest.py for each project first."
+        )
+
+    context = format_context(results)
+    citations, scores = format_citations_and_scores(results)
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
+
+    instruction = custom_instruction.strip() if mode == "Custom" and custom_instruction.strip() else mode
+    context_block = (
+        f"Writing brief (author-supplied context about this document):\n{writing_context}\n\n---\n\n"
+        if writing_context.strip() else ""
+    )
+    user_msg = (
+        f"{context_block}"
+        f"Assistance mode: {instruction}\n\n"
+        f"Author's current draft:\n\n{document_text}\n\n"
+        f"---\n\nDocument excerpts from the literature:\n\n{context}"
+    )
+
+    client_ai = anthropic.Anthropic(api_key=api_key)
+    for attempt in range(2):
+        try:
+            message = client_ai.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=ASSIST_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_msg}],
+            )
+            break
+        except anthropic.RateLimitError:
+            if attempt == 0:
+                time.sleep(65)
+            else:
+                raise
+    return message.content[0].text, citations, scores
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Query a project knowledge base via Claude.")
     parser.add_argument("--project", required=True, help="Project name (e.g. fire)")
@@ -666,7 +965,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     try:
-        answer, citations = query(args.project, args.question)
+        answer, citations, _ = query(args.project, args.question)
     except ValueError as e:
         print(f"[error] {e}")
         sys.exit(1)

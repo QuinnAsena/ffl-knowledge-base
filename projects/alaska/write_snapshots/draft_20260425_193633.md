@@ -1,0 +1,3 @@
+## Introduction
+
+Over the past several decades, warm and dry conditions have promoted extensive wildfire in vegetated ecosystems worldwide. Future changes in climate are widely anticipated to increase both the area burned and the frequency of wildfire, with cascading consequences for ecosystem structure, carbon storage, and biodiversity across fire-prone landscapes. In boreal North America, wildfire represents the dominant stand-replacing disturbance, shaping forest composition, age structure, and successional trajectories across vast spatial extents . Understanding and accurately detecting wildfire occurrence, spread, and severity is therefore a foundational challenge for both ecological research and land management.

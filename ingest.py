@@ -10,6 +10,7 @@ Zotero mode (pulls from a Zotero collection matching the project name):
 
 import argparse
 import hashlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -32,15 +33,59 @@ CHROMA_DIR = "chroma_db"
 
 
 def extract_pages(pdf_path: Path) -> list[dict]:
-    """Return [{text, page, filename}] for every non-empty page."""
+    """Return [{text, page, filename}] for every non-empty page.
+
+    For image-only pages (no extractable text), falls back to Tesseract OCR via
+    PyMuPDF's built-in bridge. If Tesseract is not installed the page is skipped
+    with a one-time warning.
+    """
     doc = fitz.open(str(pdf_path))
     pages = []
+    ocr_warned = False
     for page_num, page in enumerate(doc, start=1):
         text = page.get_text("text").strip()
+        if not text:
+            try:
+                tp = page.get_textpage_ocr(flags=3, language="eng", dpi=300)
+                text = page.get_text("text", textpage=tp).strip()
+                if text:
+                    print(f"  [ocr] Page {page_num} (Tesseract)")
+            except Exception:
+                if not ocr_warned:
+                    print(
+                        f"  [warn] {pdf_path.name}: image-only page(s) detected. "
+                        "Install Tesseract to OCR them: "
+                        "https://github.com/UB-Mannheim/tesseract/wiki"
+                    )
+                    ocr_warned = True
         if text:
             pages.append({"text": text, "page": page_num, "filename": pdf_path.name})
     doc.close()
     return pages
+
+
+def load_project_config(project: str) -> dict:
+    """Load per-project ingestion settings from projects/{project}/config.json.
+
+    Supported keys (all optional — omitted keys use the module defaults):
+        chunk_size    (int)  words per chunk
+        chunk_overlap (int)  overlapping words between consecutive chunks
+    """
+    path = Path("projects") / project / "config.json"
+    defaults = {"chunk_size": CHUNK_SIZE, "chunk_overlap": CHUNK_OVERLAP}
+    if not path.exists():
+        return defaults
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8"))
+        merged = {**defaults, **{k: int(v) for k, v in cfg.items() if k in defaults}}
+        print(
+            f"[info] Project config: chunk_size={merged['chunk_size']}, "
+            f"chunk_overlap={merged['chunk_overlap']}"
+        )
+        return merged
+    except Exception as e:
+        print(f"[warn] Could not read config.json: {e} — using defaults")
+        return defaults
 
 
 def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
@@ -59,7 +104,7 @@ def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
 
 
 def make_chunk_id(filename: str, page: int, chunk_index: int) -> str:
-    """Stable SHA-256 ID — re-ingestion is safe/idempotent."""
+    """Stable SHA-256 ID (32 hex chars) from '{filename}::p{page}::c{chunk_index}'."""
     raw = f"{filename}::p{page}::c{chunk_index}"
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
@@ -263,8 +308,12 @@ def ingest(project: str, use_zotero: bool = False) -> None:
         print("[warn] No ingestible items found.")
         sys.exit(0)
 
+    cfg = load_project_config(project)
+    chunk_size = cfg["chunk_size"]
+    chunk_overlap = cfg["chunk_overlap"]
+
     print(f"[info] Loading embedding model: {EMBED_MODEL}")
-    model = SentenceTransformer(EMBED_MODEL)
+    embed_model = SentenceTransformer(EMBED_MODEL)
 
     client = chromadb.PersistentClient(path=CHROMA_DIR)
     collection = client.get_or_create_collection(
@@ -297,7 +346,7 @@ def ingest(project: str, use_zotero: bool = False) -> None:
         item_added = 0
 
         for page_data in pages:
-            raw_chunks = chunk_text(page_data["text"], CHUNK_SIZE, CHUNK_OVERLAP)
+            raw_chunks = chunk_text(page_data["text"], chunk_size, chunk_overlap)
             ids, documents, embeddings, metadatas = [], [], [], []
 
             for idx, chunk_val in enumerate(raw_chunks):
@@ -307,7 +356,7 @@ def ingest(project: str, use_zotero: bool = False) -> None:
 
                 ids.append(chunk_id)
                 documents.append(chunk_val)
-                embeddings.append(model.encode(chunk_val, normalize_embeddings=True).tolist())
+                embeddings.append(embed_model.encode(chunk_val, normalize_embeddings=True).tolist())
                 metadatas.append(
                     {
                         "filename": page_data["filename"],

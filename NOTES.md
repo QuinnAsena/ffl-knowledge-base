@@ -253,15 +253,11 @@ ZOTERO_LIBRARY_TYPE=user    # or "group"
 
 ## Future features
 
-### Backlog (not yet scoped)
+### Pending
 - **Figure caption writer** — describe a figure, get a publication-quality caption in the style of the current manuscript section.
-- **Email and letter drafts** — same outreach mode but for professional correspondence: grant inquiry letters, collaboration proposals, cover letters.
-- **Literature review outline** — given a research question, generate a thematic outline for a review paper with suggested section headings and papers mapped to each.
-- **Systematic review assistant** — guided workflow: define inclusion/exclusion criteria → Claude screens abstracts → extracts data → drafts synthesis section. Essentially a mini-SR pipeline.
-- **OCR support** — scanned PDFs are currently skipped with a warning. Add OCR via `pytesseract` or `pymupdf` with OCR backend so image-only PDFs can be ingested.
-- **Per-project config file** — `projects/{name}/config.json` to override chunk size, overlap, and top-k defaults per project without touching code.
-- **Cross-session conversation memory** — summarise past chat sessions and carry a compressed context forward so Claude "remembers" earlier discussions within a project.
-- **Surface un-ingested Zotero papers** — in the Documents tab, show papers present in Zotero but not yet in ChromaDB, with a one-click ingest button.
+- **Email and letter drafts** — outreach mode extended to professional correspondence: grant inquiry letters, collaboration proposals, cover letters.
+- **Literature review outline** — given a research question, generate a thematic outline with suggested section headings and papers mapped to each.
+- **Systematic review assistant** — guided workflow: define inclusion/exclusion criteria → Claude screens abstracts → extracts data → drafts synthesis section.
 
 ---
 
@@ -282,6 +278,34 @@ Multi-project isolation is handled via collection namespacing.
 `query.py` is imported by `app.py`. `sys.exit` would kill the Streamlit process.
 Raising `ValueError` lets the caller (CLI or Streamlit) handle errors appropriately.
 
+**Why not `declare_component()` for the Write tab editor?**
+`declare_component(path=...)` spawns a secondary local HTTP server for the component assets.
+The browser must reach that port directly — it is not proxied through Cloudflare Tunnel, so the
+component fails to load when accessed remotely. Replaced with `st.text_area` + `st.markdown`
+(split-pane via `st.columns`). Preview updates on blur rather than on every keystroke, but the
+approach works identically local and remote with no extra ports.
+
 **Why Python 3.12 on Windows instead of 3.14?**
 `chroma-hnswlib` has no pre-built Windows wheels for Python 3.14 and must compile from C++ source.
 Python 3.12 has full wheel coverage for all ML dependencies.
+
+**Why file-based Write tab persistence rather than session state only?**
+Streamlit session state is reset on page refresh and not shared across browser tabs. Saving the
+draft to `write_draft.md` on the server means work survives refreshes, service restarts, and
+browser closes. Writing context (`write_context.md`) and external file path (`write_config.json`)
+follow the same principle — the project folder becomes the canonical record of state.
+
+**Why append-only notes rather than overwriting?**
+AI suggestion history is a research artefact. Overwriting would discard how a piece evolved.
+An append-only `write_notes.md` (with `## {mode} — {timestamp}` headers) lets the author review
+the full evolution and is easy to export, archive, or share with collaborators.
+
+**Why version snapshots before AI calls rather than on every save?**
+Snapshots on save would create noise for frequent manual saves. The meaningful state transitions
+are before AI suggestions — the author had a draft, got a suggestion, and potentially modified it.
+20 snapshots at ~5–20 KB each is negligible disk use.
+
+**Why `{stem}.notes.md` as the companion file name for network drive sync?**
+Keeps the draft and its AI notes in the same directory without ambiguity. `grant_background.md`
++ `grant_background.notes.md` is self-documenting. The author can share the draft without the
+notes by simply not sending the `.notes.md` file.

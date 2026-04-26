@@ -1,0 +1,63 @@
+{
+  "fields": [
+    "study region",
+    "target species",
+    "spatial scale"
+  ],
+  "results": [
+    {
+      "Paper": "Lara et al. (2025)",
+      "study region": "Alaska",
+      "target species": "peatlands",
+      "spatial scale": "20 m spatial resolution, ~1.5 million km\u00b2"
+    },
+    {
+      "Paper": "Xu et al. (2025)",
+      "study region": "\u2014",
+      "target species": "\u2014",
+      "spatial scale": "\u2014"
+    },
+    {
+      "Paper": "Di Giuseppe et al. (2025)",
+      "study region": "Global",
+      "target species": "\u2014",
+      "spatial scale": "Global, kilometer-scale"
+    },
+    {
+      "Paper": "Zhang et al. (2024)",
+      "study region": "Global",
+      "target species": "\u2014",
+      "spatial scale": "Global scale, 0.25\u00b0 \u00d7 0.25\u00b0 spatial resolution"
+    },
+    {
+      "Paper": "McNorton et al. (2024)",
+      "study region": "Global",
+      "target species": "\u2014",
+      "spatial scale": "~9 km horizontal resolution, global scale"
+    },
+    {
+      "Paper": "Zhang et al. (2021)",
+      "study region": "Australia, Canada, and the United States",
+      "target species": "\u2014",
+      "spatial scale": "\u2014"
+    },
+    {
+      "Paper": "Zhang et al. (2019)",
+      "study region": "Yunnan Province, China",
+      "target species": "\u2014",
+      "spatial scale": "regional"
+    },
+    {
+      "Paper": "Wheatcroft (2019)",
+      "study region": "\u2014",
+      "target species": "\u2014",
+      "spatial scale": "\u2014"
+    },
+    {
+      "Paper": "GRKL6INN.web",
+      "study region": "\u2014",
+      "target species": "\u2014",
+      "spatial scale": "\u2014"
+    }
+  ]
+}

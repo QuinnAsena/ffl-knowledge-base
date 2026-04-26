@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -19,12 +20,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from query import (
+    CHROMA_DIR,
     DRAFT_SYSTEM_PROMPT,
     GAP_MAP_SYSTEM_PROMPT,
     OUTREACH_SYSTEM_PROMPT,
     PAPER_SYSTEM_PROMPT,
     REVIEWER_SYSTEM_PROMPT,
     annotate_paper,
+    assist_writing,
+    assist_writing_multi,
     draft,
     draft_multi,
     extract_fields_from_paper,
@@ -32,7 +36,9 @@ from query import (
     query,
     query_multi,
     refine_draft,
+    summarise_conversation,
 )
+
 
 # ── Page config ───────────────────────────────────────────────────────────────
 
@@ -91,7 +97,7 @@ def get_document_index(project: str) -> list[dict]:
     Returns a list of dicts sorted by author/year.
     """
     try:
-        client = chromadb.PersistentClient(path="chroma_db")
+        client = chromadb.PersistentClient(path=CHROMA_DIR)
         if project not in client.list_collections():
             return []
         collection = client.get_collection(project)
@@ -124,10 +130,21 @@ def get_document_index(project: str) -> list[dict]:
 
     rows = []
     for d in docs.values():
-        rows.append({**d, "page_count": len(d["pages"])})
+        rows.append({
+            "filename":   d["filename"],
+            "title":      d["title"],
+            "author_str": d["author_str"],
+            "year":       d["year"],
+            "doi":        d["doi"],
+            "chunks":     d["chunks"],
+            "page_count": len(d["pages"]),
+        })
 
     # Sort: Zotero items (have author) first by year desc, then plain filenames
-    rows.sort(key=lambda r: (0 if r["author_str"] else 1, -(int(r["year"]) if r["year"].isdigit() else 0)))
+    rows.sort(key=lambda r: (
+        0 if r["author_str"] else 1,
+        -(int(r["year"]) if str(r.get("year") or "").isdigit() else 0),
+    ))
     return rows
 
 
@@ -151,6 +168,119 @@ def _save_themes(project: str, themes: dict) -> None:
     p.write_text(json.dumps(themes, indent=2), encoding="utf-8")
 
 
+# ── Pandoc export helper ──────────────────────────────────────────────────────
+
+
+@st.cache_resource
+def _pandoc_available() -> bool:
+    try:
+        result = subprocess.run(
+            ["pandoc", "--version"], capture_output=True, timeout=5
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def _run_pandoc(markdown_text: str, fmt: str) -> bytes:
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "draft.md"
+        out = Path(tmp) / f"draft.{fmt}"
+        src.write_text(markdown_text, encoding="utf-8")
+        subprocess.run(
+            ["pandoc", str(src), "-o", str(out)],
+            check=True, capture_output=True,
+        )
+        return out.read_bytes()
+
+
+# ── Write tab helpers ─────────────────────────────────────────────────────────
+
+
+def _write_draft_path(project: str) -> Path:
+    return Path("projects") / project / "write_draft.md"
+
+
+def _write_notes_path(project: str) -> Path:
+    return Path("projects") / project / "write_notes.md"
+
+
+def _write_context_path(project: str) -> Path:
+    return Path("projects") / project / "write_context.md"
+
+
+def _write_config_path(project: str) -> Path:
+    return Path("projects") / project / "write_config.json"
+
+
+def _load_write_config(project: str) -> dict:
+    p = _write_config_path(project)
+    try:
+        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_write_config(project: str, config: dict) -> None:
+    p = _write_config_path(project)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+
+def _append_to_notes(notes_path: Path, mode: str, response: str, draft_snippet: str) -> None:
+    notes_path.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    snippet = draft_snippet.strip()[:200].replace("\n", " ")
+    entry = (
+        f"\n## {mode} — {ts}\n\n"
+        + (f"> *Draft opening: \"{snippet}…\"*\n\n" if snippet else "")
+        + f"{response}\n\n---\n"
+    )
+    with open(notes_path, "a", encoding="utf-8") as f:
+        f.write(entry)
+
+
+def _snapshot_draft(project: str, text: str) -> None:
+    snap_dir = Path("projects") / project / "write_snapshots"
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    (snap_dir / f"draft_{ts}.md").write_text(text, encoding="utf-8")
+    for old in sorted(snap_dir.glob("draft_*.md"))[:-20]:
+        old.unlink()
+
+
+WRITE_TEMPLATES = {
+    "Grant: Background & Significance": (
+        "## Background\n\n\n\n## Significance\n\n"
+    ),
+    "Grant: Objectives & Aims": (
+        "## Specific Aims\n\n1. \n2. \n3. \n\n## Objectives\n\n"
+    ),
+    "Academic: Introduction": (
+        "## Introduction\n\n\n\n### Research gap\n\n\n\n### Hypothesis\n\n"
+    ),
+    "Academic: Methods": (
+        "## Methods\n\n### Study design\n\n\n\n### Data collection\n\n\n\n### Analysis\n\n"
+    ),
+    "Academic: Discussion": (
+        "## Discussion\n\n\n\n### Limitations\n\n\n\n### Implications\n\n"
+    ),
+    "Outreach: Press release": (
+        "**FOR IMMEDIATE RELEASE**\n\n## [Headline]\n\n[Lead sentence]\n\n"
+        "### Key findings\n\n\n\n### About [lab name]\n\n"
+    ),
+    "Outreach: Blog post": (
+        "# [Title]\n\n[Hook paragraph]\n\n## Key findings\n\n\n\n## Why it matters\n\n"
+    ),
+    "Response to reviewers": (
+        "## Response to Reviewer 1\n\n"
+        "### Comment 1.1\n\n**Reviewer:** \n\n**Response:** \n\n"
+        "### Comment 1.2\n\n**Reviewer:** \n\n**Response:** \n\n"
+    ),
+}
+
+
 # ── Annotation persistence helpers ────────────────────────────────────────────
 
 
@@ -169,6 +299,76 @@ def _save_annotations(project: str, annotations: dict) -> None:
     p = _annotations_path(project)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(annotations, indent=2), encoding="utf-8")
+
+
+# ── Cross-session memory helpers ─────────────────────────────────────────────
+
+
+def _memory_path(project: str) -> Path:
+    return Path("projects") / project / "memory.json"
+
+
+def _load_memory(project: str) -> list[dict]:
+    p = _memory_path(project)
+    if p.exists():
+        return json.loads(p.read_text(encoding="utf-8"))
+    return []
+
+
+def _save_memory(project: str, memories: list[dict]) -> None:
+    p = _memory_path(project)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(memories, indent=2), encoding="utf-8")
+
+
+# ── Zotero comparison helper ──────────────────────────────────────────────────
+
+
+def get_zotero_titles(project: str) -> list[dict]:
+    """Fetch item metadata from the matching Zotero collection without downloading files."""
+    try:
+        from pyzotero import zotero as pyzotero_lib
+    except ImportError:
+        return []
+
+    api_key = os.getenv("ZOTERO_API_KEY")
+    user_id = os.getenv("ZOTERO_USER_ID")
+    library_type = os.getenv("ZOTERO_LIBRARY_TYPE", "user")
+
+    if not api_key or not user_id:
+        return []
+
+    try:
+        zot = pyzotero_lib.Zotero(user_id, library_type, api_key)
+        all_colls = zot.collections()
+        matches = [c for c in all_colls if c["data"]["name"].lower() == project.lower()]
+        if not matches:
+            return []
+
+        raw = [
+            i for i in zot.collection_items(matches[0]["key"], itemType="-attachment")
+            if i["data"].get("itemType") != "note"
+        ]
+
+        result = []
+        for item in raw:
+            d = item["data"]
+            authors = [c for c in d.get("creators", []) if c.get("creatorType") == "author"]
+            if not authors:
+                author_str = ""
+            elif len(authors) == 1:
+                author_str = authors[0].get("lastName") or authors[0].get("name", "")
+            else:
+                author_str = f"{authors[0].get('lastName', 'Unknown')} et al."
+            result.append({
+                "title": d.get("title", ""),
+                "author_str": author_str,
+                "year": (d.get("date") or "")[:4],
+                "doi": d.get("DOI", ""),
+            })
+        return result
+    except Exception:
+        return []
 
 
 # ── Extraction persistence helpers ────────────────────────────────────────────
@@ -194,6 +394,28 @@ def _save_extraction(project: str, fields: list, results: list) -> None:
 def _build_theme_graph(docs: list[dict], themes_map: dict) -> str:
     from pyvis.network import Network
 
+    # Normalise: old list format → uniform weight dict; new dict format → use as-is
+    norm: dict[str, dict[str, float]] = {}
+    for fname, value in themes_map.items():
+        if isinstance(value, list):
+            norm[fname] = {t: 1.0 for t in value}
+        elif isinstance(value, dict):
+            norm[fname] = {k: float(v) for k, v in value.items()}
+        else:
+            norm[fname] = {}
+
+    # Cumulative weight per theme (sum of all edge weights connecting to it)
+    theme_total_weight: dict[str, float] = {}
+    for tw in norm.values():
+        for theme, weight in tw.items():
+            theme_total_weight[theme] = theme_total_weight.get(theme, 0.0) + weight
+
+    # Count papers per theme (for tooltip)
+    theme_paper_count: dict[str, int] = {}
+    for tw in norm.values():
+        for theme in tw:
+            theme_paper_count[theme] = theme_paper_count.get(theme, 0) + 1
+
     net = Network(height="640px", width="100%", bgcolor="#0f172a", font_color="#e2e8f0")
     net.set_options("""{
         "physics": {
@@ -216,7 +438,7 @@ def _build_theme_graph(docs: list[dict], themes_map: dict) -> str:
         },
         "edges": {
             "smooth": {"enabled": true, "type": "continuous", "roundness": 0.45},
-            "hoverWidth": 2.5
+            "hoverWidth": 1.5
         },
         "interaction": {
             "hover": true,
@@ -226,16 +448,10 @@ def _build_theme_graph(docs: list[dict], themes_map: dict) -> str:
         }
     }""")
 
-    # Count how many papers share each theme (for node sizing)
-    theme_degree: dict[str, int] = {}
-    for themes in themes_map.values():
-        for t in themes:
-            theme_degree[t] = theme_degree.get(t, 0) + 1
-
     doc_map = {d["filename"]: d for d in docs}
 
-    for fname, themes in themes_map.items():
-        if not themes:
+    for fname, themes_weights in norm.items():
+        if not themes_weights:
             continue
         doc = doc_map.get(fname, {})
         label = (
@@ -259,8 +475,9 @@ def _build_theme_graph(docs: list[dict], themes_map: dict) -> str:
             title=f"<div style='font-family:sans-serif;max-width:240px'><b>{title_text}</b><br><i style='color:#94a3b8'>{label}</i></div>",
         )
 
-    for theme, degree in theme_degree.items():
-        node_size = 13 + min(degree * 5, 22)
+    for theme, total_w in theme_total_weight.items():
+        node_size = 13 + min(total_w * 4, 24)   # range ~13–37 px
+        count = theme_paper_count[theme]
         net.add_node(
             f"__t__{theme}",
             label=theme,
@@ -273,18 +490,25 @@ def _build_theme_graph(docs: list[dict], themes_map: dict) -> str:
             size=node_size,
             shape="ellipse",
             font={"size": 11, "color": "#fef3c7"},
-            title=f"<div style='font-family:sans-serif'><b style='color:#fcd34d'>{theme}</b><br><span style='color:#94a3b8'>Shared by {degree} paper{'s' if degree != 1 else ''}</span></div>",
+            title=(
+                f"<div style='font-family:sans-serif'>"
+                f"<b style='color:#fcd34d'>{theme}</b><br>"
+                f"<span style='color:#94a3b8'>{count} paper{'s' if count != 1 else ''} · "
+                f"total relevance: {total_w:.1f}</span></div>"
+            ),
         )
 
-    for fname, themes in themes_map.items():
-        if not themes or fname not in doc_map:
+    for fname, themes_weights in norm.items():
+        if not themes_weights or fname not in doc_map:
             continue
-        for theme in themes:
+        for theme, weight in themes_weights.items():
+            edge_width = 0.8 + weight * 3.2   # range 0.9 (w=0.1) to 4.0 (w=1.0)
             net.add_edge(
                 fname,
                 f"__t__{theme}",
                 color={"color": "#334155", "highlight": "#64748b", "hover": "#94a3b8"},
-                width=1.5,
+                width=edge_width,
+                title=f"<span style='font-family:sans-serif;color:#e2e8f0'>Relevance: {weight:.2f}</span>",
             )
 
     return net.generate_html()
@@ -323,13 +547,31 @@ with st.sidebar:
     col1, col2 = st.columns(2)
     with col1:
         if st.button("New chat", use_container_width=True):
+            cur_msgs = st.session_state.get(f"messages_{selected_project}", [])
+            cur_file = st.session_state.get(f"history_file_{selected_project}")
+            if len([m for m in cur_msgs if m["role"] == "user"]) >= 2 and cur_file:
+                st.session_state[f"_pending_summary_{selected_project}"] = {
+                    "messages": cur_msgs,
+                    "file": str(cur_file),
+                }
             st.session_state[f"messages_{selected_project}"] = []
             st.session_state.pop(f"history_file_{selected_project}", None)
             st.rerun()
     with col2:
-        msg_count = len(st.session_state.get(f"messages_{selected_project}", []))
         st.button("Saved", disabled=True, use_container_width=True,
                   help="Conversations are auto-saved after each response.")
+
+    # Memory display
+    memories = _load_memory(selected_project)
+    if memories:
+        st.markdown("---")
+        with st.expander(f"Research memory ({len(memories)})"):
+            for mem in reversed(memories[-5:]):
+                ts = mem.get("timestamp", "")[:10]
+                st.caption(f"*{ts}* — {mem['summary']}")
+            if st.button("Clear memory", key="clear_memory"):
+                _save_memory(selected_project, [])
+                st.rerun()
 
     past = list_conversations(selected_project)
     if past:
@@ -353,6 +595,36 @@ with st.sidebar:
 
     st.markdown("---")
     with st.expander("Advanced settings"):
+        _model_options = {
+            "Sonnet 4.6 — recommended": "claude-sonnet-4-6",
+            "Haiku 4.5 — fast & lower cost": "claude-haiku-4-5-20251001",
+            "Opus 4.7 — highest quality": "claude-opus-4-7",
+        }
+        _model_label = st.selectbox(
+            "Claude model",
+            list(_model_options.keys()),
+            help=(
+                "Sonnet 4.6 is the best balance of quality and cost for most tasks. "
+                "Haiku 4.5 is faster and cheaper — good for quick exploration. "
+                "Opus 4.7 is the most capable — best for final grant drafts at higher cost."
+            ),
+        )
+        claude_model = _model_options[_model_label]
+
+        temperature = st.slider(
+            "Temperature",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.3,
+            step=0.05,
+            help=(
+                "Controls output variability. "
+                "0.0–0.3 = precise and consistent (best for Q&A and factual extraction). "
+                "0.4–0.6 = balanced (good for grant drafting). "
+                "0.7–1.0 = more creative (outreach writing, brainstorming)."
+            ),
+        )
+
         retrieval_k = st.slider(
             "Passages retrieved (Draft & Extract)",
             min_value=5,
@@ -363,6 +635,26 @@ with st.sidebar:
                 "How many passages from the literature are sent to Claude when drafting or "
                 "extracting. More passages = broader coverage but slower and higher API cost. "
                 "Chat queries always use 5."
+            ),
+        )
+
+        max_draft_tokens = st.select_slider(
+            "Max draft length (tokens)",
+            options=[1024, 2048, 4096, 6144, 8192],
+            value=2048,
+            help=(
+                "Maximum length of generated drafts. "
+                "2 048 suits most sections. Raise to 4 096+ for long background or methods sections. "
+                "1 token ≈ ¾ of a word."
+            ),
+        )
+
+        show_scores = st.toggle(
+            "Show retrieval scores",
+            value=False,
+            help=(
+                "Display cosine similarity scores (0–1) next to source chunks. "
+                "Scores above ~0.6 indicate strong relevance; below ~0.4 the match may be weak."
             ),
         )
 
@@ -378,13 +670,38 @@ messages = st.session_state[messages_key]
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab_chat, tab_docs, tab_draft, tab_extract, tab_graph = st.tabs(
-    ["Chat", "Documents", "Draft", "Extract", "Graph"]
+tab_chat, tab_docs, tab_extract, tab_draft, tab_write, tab_graph, tab_guide = st.tabs(
+    ["Chat", "Documents", "Extract", "Draft", "Write", "Graph", "Guide"]
 )
 
 # ── Chat tab ──────────────────────────────────────────────────────────────────
 
 with tab_chat:
+    # Process any pending conversation summary from the previous "New Chat" click
+    _pending_key = f"_pending_summary_{selected_project}"
+    if _pending_key in st.session_state and os.getenv("ANTHROPIC_API_KEY"):
+        pending = st.session_state.pop(_pending_key)
+        try:
+            with st.spinner("Saving session to memory…"):
+                summary = summarise_conversation(pending["messages"])
+                mems = _load_memory(selected_project)
+                existing_files = {m.get("file") for m in mems}
+                if Path(pending["file"]).name not in existing_files:
+                    mems.append({
+                        "summary": summary,
+                        "timestamp": datetime.now().isoformat(),
+                        "file": Path(pending["file"]).name,
+                    })
+                    _save_memory(selected_project, mems[-20:])
+        except Exception as _e:
+            st.warning(f"Could not save session to memory: {_e}")
+
+    # Build prior-context string from most recent memory entries
+    _prior_context = ""
+    _mems = _load_memory(selected_project)
+    if _mems:
+        _prior_context = "\n".join(f"- {m['summary']}" for m in _mems[-3:])
+
     other_projects_chat = [p for p in projects if p != selected_project]
     if other_projects_chat:
         extra_chat = st.multiselect(
@@ -406,8 +723,12 @@ with tab_chat:
             st.markdown(msg["content"])
             if msg["role"] == "assistant" and msg.get("citations"):
                 with st.expander("Source chunks retrieved", expanded=False):
-                    for ref in msg["citations"]:
-                        st.markdown(f"- {ref}")
+                    _sc = msg.get("scores", [])
+                    for i, ref in enumerate(msg["citations"]):
+                        if show_scores and i < len(_sc):
+                            st.markdown(f"- {ref}  ·  match: **{_sc[i]:.2f}**")
+                        else:
+                            st.markdown(f"- {ref}")
 
     if prompt := st.chat_input("Ask a question about the literature…"):
         messages.append({"role": "user", "content": prompt})
@@ -422,9 +743,17 @@ with tab_chat:
             with st.spinner("Searching documents and generating answer…"):
                 try:
                     if len(active_projects_chat) > 1:
-                        answer, citations = query_multi(active_projects_chat, prompt)
+                        answer, citations, scores = query_multi(
+                            active_projects_chat, prompt,
+                            prior_context=_prior_context,
+                            model=claude_model, temperature=temperature,
+                        )
                     else:
-                        answer, citations = query(selected_project, prompt)
+                        answer, citations, scores = query(
+                            selected_project, prompt,
+                            prior_context=_prior_context,
+                            model=claude_model, temperature=temperature,
+                        )
                 except ValueError as e:
                     st.error(str(e))
                     st.stop()
@@ -435,10 +764,11 @@ with tab_chat:
             st.markdown(answer)
             if citations:
                 with st.expander("Source chunks retrieved", expanded=False):
-                    for ref in citations:
-                        st.markdown(f"- {ref}")
+                    for ref, score in zip(citations, scores):
+                        line = f"- {ref}  ·  match: **{score:.2f}**" if show_scores else f"- {ref}"
+                        st.markdown(line)
 
-        messages.append({"role": "assistant", "content": answer, "citations": citations})
+        messages.append({"role": "assistant", "content": answer, "citations": citations, "scores": scores})
 
         if file_key not in st.session_state:
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -531,10 +861,42 @@ with tab_docs:
                 mime="text/markdown",
             )
 
-        st.markdown(
-            "To add more papers: add them to your Zotero collection, then run "
-            f"`python ingest.py --project {selected_project} --zotero`"
-        )
+        # ── Un-ingested Zotero papers ─────────────────────────────────────────
+        if os.getenv("ZOTERO_API_KEY") and os.getenv("ZOTERO_USER_ID"):
+            zotero_cache_key = f"_zotero_{selected_project}"
+            col_z1, col_z2 = st.columns([5, 1])
+            col_z1.markdown("**Zotero sync check**")
+            if col_z2.button("Refresh", key="refresh_zotero"):
+                st.session_state.pop(zotero_cache_key, None)
+            if zotero_cache_key not in st.session_state:
+                with st.spinner("Fetching Zotero collection…"):
+                    st.session_state[zotero_cache_key] = get_zotero_titles(selected_project)
+            zotero_items = st.session_state[zotero_cache_key]
+            if zotero_items:
+                ingested_dois = {d["doi"].lower() for d in docs if d.get("doi")}
+                ingested_titles = {d["title"].lower().strip() for d in docs if d.get("title")}
+                not_ingested = []
+                for _z in zotero_items:
+                    _doi = (_z.get("doi") or "").lower()
+                    _title = (_z.get("title") or "").lower().strip()
+                    if not ((_doi and _doi in ingested_dois) or (_title and _title in ingested_titles)):
+                        not_ingested.append(_z)
+                if not_ingested:
+                    with st.expander(f"{len(not_ingested)} paper(s) in Zotero not yet ingested", expanded=True):
+                        for z in not_ingested:
+                            lbl = (f"**{z['author_str']} ({z['year']})** — {z['title']}"
+                                   if z["author_str"] else z["title"])
+                            st.markdown(f"- {lbl}")
+                        st.caption(
+                            f"Run `python ingest.py --project {selected_project} --zotero` to ingest these."
+                        )
+                else:
+                    st.success("All Zotero papers are ingested.")
+        else:
+            st.markdown(
+                "To add more papers: add them to your Zotero collection, then run "
+                f"`python ingest.py --project {selected_project} --zotero`"
+            )
 
 # ── Draft tab ─────────────────────────────────────────────────────────────────
 
@@ -673,11 +1035,13 @@ with tab_draft:
                 try:
                     if len(active_projects_draft) > 1:
                         draft_text, draft_citations = draft_multi(
-                            active_projects_draft, full_prompt, mode["system_prompt"], retrieval_k
+                            active_projects_draft, full_prompt, mode["system_prompt"], retrieval_k,
+                            model=claude_model, temperature=temperature, max_tokens=max_draft_tokens,
                         )
                     else:
                         draft_text, draft_citations = draft(
-                            selected_project, full_prompt, mode["system_prompt"], retrieval_k
+                            selected_project, full_prompt, mode["system_prompt"], retrieval_k,
+                            model=claude_model, temperature=temperature, max_tokens=max_draft_tokens,
                         )
                 except ValueError as e:
                     st.error(str(e))
@@ -774,7 +1138,6 @@ with tab_extract:
             if not extract_docs:
                 st.warning("No documents ingested yet.")
             else:
-                import time as _time
                 n = len(extract_docs)
                 st.caption(
                     f"Processing {n} paper(s) — allow ~{n * 8} seconds "
@@ -791,7 +1154,7 @@ with tab_extract:
                     except Exception as e:
                         extracted = {f: f"ERROR: {type(e).__name__}: {e}" for f in fields}
                     if i < n - 1:
-                        _time.sleep(7)
+                        time.sleep(7)
                     ref = (
                         f"{doc['author_str']} ({doc['year']})"
                         if doc["author_str"] and doc["year"]
@@ -821,8 +1184,6 @@ with tab_extract:
 # ── Graph tab ─────────────────────────────────────────────────────────────────
 
 with tab_graph:
-    import time as _time_g
-
     st.header(f"Theme map — {selected_project}")
     st.caption(
         "Papers are blue nodes; shared themes are amber nodes. "
@@ -858,13 +1219,13 @@ with tab_graph:
             for i, doc in enumerate(papers_to_tag):
                 prog.progress(i / n, text=f"Tagging {doc['filename']}…")
                 try:
-                    themes = extract_themes(selected_project, doc["filename"])
+                    themes = extract_themes(selected_project, doc["filename"], model=claude_model)
                     themes_map[doc["filename"]] = themes
                 except Exception as e:
-                    themes_map[doc["filename"]] = []
+                    themes_map[doc["filename"]] = {}
                     st.warning(f"Could not tag {doc['filename']}: {e}")
                 if i < n - 1:
-                    _time_g.sleep(7)
+                    time.sleep(7)
             prog.progress(1.0, text="Done.")
             _save_themes(selected_project, themes_map)
             st.rerun()
@@ -880,3 +1241,423 @@ with tab_graph:
             )
     elif graph_docs:
         st.info("Click **Tag unprocessed papers** above to generate the theme map.")
+
+# ── Guide tab ─────────────────────────────────────────────────────────────────
+
+with tab_guide:
+    guide_path = Path("USER_GUIDE.md")
+    if guide_path.exists():
+        st.markdown(guide_path.read_text(encoding="utf-8"))
+    else:
+        st.warning("USER_GUIDE.md not found.")
+
+# ── Write tab ─────────────────────────────────────────────────────────────────
+
+with tab_write:
+    st.header(f"Write — {selected_project}")
+
+    other_projects_write = [p for p in projects if p != selected_project]
+    write_extra = []
+    if other_projects_write:
+        write_extra = st.multiselect(
+            "Also draw from",
+            other_projects_write,
+            default=[],
+            help="Include literature from additional projects when requesting AI assistance.",
+            key="extra_write",
+        )
+
+    # ── Session state keys ────────────────────────────────────────────────────
+    _wkey_resp    = f"write_ai_response_{selected_project}"
+    _wkey_mode    = f"write_ai_mode_{selected_project}"
+    _wkey_cites   = f"write_cites_{selected_project}"
+    _wkey_ctext   = f"write_cached_text_{selected_project}"
+    _wkey_cmode   = f"write_cached_mode_{selected_project}"
+    _wkey_cproj   = f"write_cached_proj_{selected_project}"
+    _wkey_cctx    = f"write_cached_ctx_{selected_project}"
+    _wkey_ctx     = f"write_context_{selected_project}"
+    _wkey_extpath = f"write_ext_path_{selected_project}"
+    _wkey_widget  = f"write_textarea_{selected_project}"
+    _wkey_pending = f"write_textarea_pending_{selected_project}"
+    _wkey_rpane   = f"write_right_pane_{selected_project}"
+    _wkey_rswitch = f"write_rpane_switch_{selected_project}"
+
+    for _k, _v in [
+        (_wkey_resp, ""), (_wkey_mode, ""), (_wkey_cites, []),
+        (_wkey_ctext, ""), (_wkey_cmode, ""), (_wkey_cproj, []), (_wkey_cctx, ""),
+        (_wkey_rpane, "Preview"),
+    ]:
+        if _k not in st.session_state:
+            st.session_state[_k] = _v
+
+    # Pending editor content — must be applied before text_area renders.
+    if _wkey_pending in st.session_state:
+        st.session_state[_wkey_widget] = st.session_state.pop(_wkey_pending)
+
+    # Auto-switch right pane to AI response after a successful call — must happen
+    # before the radio widget renders (same Streamlit constraint as the textarea).
+    if st.session_state.pop(_wkey_rswitch, False):
+        st.session_state[_wkey_rpane] = "AI response"
+
+    # Load per-project draft from file on first render
+    if _wkey_widget not in st.session_state:
+        _draft_file = _write_draft_path(selected_project)
+        st.session_state[_wkey_widget] = (
+            _draft_file.read_text(encoding="utf-8") if _draft_file.exists() else ""
+        )
+
+    # Load writing context from file on first render
+    if _wkey_ctx not in st.session_state:
+        _ctx_file = _write_context_path(selected_project)
+        st.session_state[_wkey_ctx] = (
+            _ctx_file.read_text(encoding="utf-8") if _ctx_file.exists() else ""
+        )
+
+    # Load external file path from write_config.json on first render
+    if _wkey_extpath not in st.session_state:
+        st.session_state[_wkey_extpath] = _load_write_config(selected_project).get(
+            "external_file", ""
+        )
+
+    # Writing context drives AI calls — use the saved value so it's stable across reruns.
+    writing_context = st.session_state.get(_wkey_ctx, "")
+
+    # ── AI bar (above editor) ─────────────────────────────────────────────────
+    st.caption(
+        "Ask AI — retrieves relevant passages from the literature, then Claude assists "
+        "with your draft. Set a writing context below to give the AI additional guidance."
+    )
+    _assist_cols = st.columns([1, 1, 1, 1, 3, 1])
+    _mode_btn_labels = ["Find citations", "Refine", "Challenge", "Expand"]
+    _selected_mode = None
+
+    for _i, _label in enumerate(_mode_btn_labels):
+        if _assist_cols[_i].button(
+            _label,
+            key=f"write_mode_{_label}_{selected_project}",
+            use_container_width=True,
+        ):
+            _selected_mode = _label
+
+    with _assist_cols[4]:
+        _custom_instruction = st.text_input(
+            "custom",
+            placeholder="Custom instruction…",
+            label_visibility="collapsed",
+            key=f"write_custom_{selected_project}",
+        )
+    if _assist_cols[5].button(
+        "Ask", key=f"write_ask_{selected_project}", use_container_width=True, type="primary"
+    ):
+        _selected_mode = "Custom"
+
+    # ── Editor / right pane ───────────────────────────────────────────────────
+    col_edit, col_right = st.columns(2, gap="medium")
+
+    with col_edit:
+        st.caption("Markdown editor")
+        draft_text = st.text_area(
+            label="editor",
+            height=440,
+            placeholder="Start writing here. Markdown is supported.",
+            label_visibility="collapsed",
+            key=_wkey_widget,
+        )
+
+    with col_right:
+        # Pane header: label on left, toggle on right
+        _rh_left, _rh_right = st.columns([2, 3])
+        _rh_left.caption("Preview / AI response")
+        _rpane_view = _rh_right.radio(
+            "view",
+            ["Preview", "AI response"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key=_wkey_rpane,
+        )
+
+        if _rpane_view == "Preview":
+            if draft_text.strip():
+                st.markdown(draft_text)
+            else:
+                st.markdown("*Preview appears as you write…*")
+        else:
+            # AI response pane
+            if st.session_state[_wkey_resp]:
+                _mode_label = st.session_state.get(_wkey_mode, "AI")
+                _rp_hdr, _rp_ref, _rp_clr = st.columns([5, 1, 1])
+                _rp_hdr.caption(f"AI — {_mode_label}")
+                if _rp_ref.button("↺", key=f"write_refresh_{selected_project}",
+                                  help="Clear cache and regenerate"):
+                    for _k in (_wkey_ctext, _wkey_cmode, _wkey_cctx, _wkey_resp):
+                        st.session_state[_k] = ""
+                    st.session_state[_wkey_cproj] = []
+                    st.session_state[_wkey_cites] = []
+                    st.rerun()
+                if _rp_clr.button("✕", key=f"write_clear_{selected_project}",
+                                  help="Dismiss suggestion"):
+                    st.session_state[_wkey_resp]  = ""
+                    st.session_state[_wkey_cites] = []
+                    st.session_state[_wkey_rpane] = "Preview"
+                    st.rerun()
+
+                st.markdown(st.session_state[_wkey_resp])
+
+                if st.session_state[_wkey_cites]:
+                    with st.expander("Sources", expanded=False):
+                        for _c in st.session_state[_wkey_cites]:
+                            st.caption(_c)
+
+                _ra1, _ra2 = st.columns(2)
+                if _ra1.button("Save to notes", key=f"write_save_notes_{selected_project}",
+                               use_container_width=True):
+                    _append_to_notes(
+                        _write_notes_path(selected_project),
+                        mode=_mode_label,
+                        response=st.session_state[_wkey_resp],
+                        draft_snippet=draft_text,
+                    )
+                    st.success("Saved to write_notes.md")
+                if _ra2.button("Append to draft", key=f"write_append_{selected_project}",
+                               use_container_width=True, type="primary"):
+                    st.session_state[_wkey_pending] = (
+                        draft_text.rstrip() + "\n\n" + st.session_state[_wkey_resp]
+                    )
+                    st.session_state[_wkey_rpane] = "Preview"
+                    st.rerun()
+            else:
+                st.markdown(
+                    "*No AI suggestion yet — choose a mode above and click **Ask**.*"
+                )
+
+    # ── API call (after columns so draft_text is available) ───────────────────
+    if _selected_mode:
+        if not draft_text.strip():
+            st.warning("Write something in the editor first, then request AI assistance.")
+        else:
+            _write_projects = sorted([selected_project] + write_extra)
+            _is_cached = (
+                draft_text == st.session_state[_wkey_ctext]
+                and _selected_mode == st.session_state[_wkey_cmode]
+                and _write_projects == st.session_state[_wkey_cproj]
+                and writing_context == st.session_state[_wkey_cctx]
+                and st.session_state[_wkey_resp]
+            )
+            if _is_cached:
+                st.session_state[_wkey_rpane] = "AI response"
+                st.rerun()
+            else:
+                _snapshot_draft(selected_project, draft_text)
+                st.session_state[_wkey_mode] = _selected_mode
+                with st.spinner(f"Asking AI ({_selected_mode})…"):
+                    try:
+                        if len(_write_projects) > 1:
+                            _resp, _cites, _ = assist_writing_multi(
+                                projects=_write_projects,
+                                document_text=draft_text,
+                                mode=_selected_mode,
+                                custom_instruction=_custom_instruction,
+                                writing_context=writing_context,
+                                top_k=retrieval_k,
+                                model=claude_model,
+                                temperature=temperature,
+                            )
+                        else:
+                            _resp, _cites, _ = assist_writing(
+                                project=selected_project,
+                                document_text=draft_text,
+                                mode=_selected_mode,
+                                custom_instruction=_custom_instruction,
+                                writing_context=writing_context,
+                                top_k=retrieval_k,
+                                model=claude_model,
+                                temperature=temperature,
+                            )
+                        st.session_state[_wkey_resp]  = _resp
+                        st.session_state[_wkey_cites] = _cites
+                        st.session_state[_wkey_ctext] = draft_text
+                        st.session_state[_wkey_cmode] = _selected_mode
+                        st.session_state[_wkey_cproj] = _write_projects
+                        st.session_state[_wkey_cctx]  = writing_context
+                        # Signal the right pane to switch on next render
+                        st.session_state[_wkey_rswitch] = True
+                    except Exception as e:
+                        st.session_state[_wkey_resp] = f"**Error:** {e}"
+                        st.session_state[_wkey_rswitch] = True
+                st.rerun()
+
+    st.divider()
+
+    # ── Footer row: template picker + export + save ───────────────────────────
+    _ft1, _ft2, _ft3, _ft4, _ft5 = st.columns([3, 1, 1, 1, 1])
+
+    with _ft1:
+        _tmpl_sel = st.selectbox(
+            "Template",
+            ["— no template —"] + list(WRITE_TEMPLATES.keys()),
+            key=f"write_tmpl_{selected_project}",
+            label_visibility="visible",
+        )
+    with _ft2:
+        st.write("")  # vertical alignment
+        if st.button(
+            "Apply",
+            key=f"write_tmpl_apply_{selected_project}",
+            disabled=(_tmpl_sel == "— no template —"),
+            use_container_width=True,
+            help="Replaces editor contents. Save your draft first if needed.",
+        ):
+            st.session_state[_wkey_pending] = WRITE_TEMPLATES[_tmpl_sel]
+            st.rerun()
+    with _ft3:
+        st.write("")
+        st.download_button(
+            "Download .md",
+            data=draft_text,
+            file_name=f"{selected_project}_draft.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
+    with _ft4:
+        st.write("")
+        if _pandoc_available():
+            if st.button("Export DOCX", key=f"write_docx_{selected_project}",
+                         use_container_width=True):
+                if not draft_text.strip():
+                    st.warning("Nothing to export — write something first.")
+                else:
+                    try:
+                        _docx = _run_pandoc(draft_text, "docx")
+                        st.download_button(
+                            "Download DOCX",
+                            data=_docx,
+                            file_name=f"{selected_project}_draft.docx",
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            key=f"write_docx_dl_{selected_project}",
+                        )
+                    except subprocess.CalledProcessError as e:
+                        st.error(f"Pandoc failed: {e.stderr.decode()[:200]}")
+        else:
+            st.caption("[pandoc](https://pandoc.org/installing.html) not installed")
+    with _ft5:
+        st.write("")
+        if st.button("Save draft", key=f"write_save_draft_{selected_project}",
+                     use_container_width=True, type="primary"):
+            _write_draft_path(selected_project).parent.mkdir(parents=True, exist_ok=True)
+            _write_draft_path(selected_project).write_text(draft_text, encoding="utf-8")
+            st.success("Draft saved.")
+
+    st.caption(
+        f"Snapshots auto-saved before each AI call → "
+        f"`projects/{selected_project}/write_snapshots/`"
+    )
+
+    # ── Writing context ───────────────────────────────────────────────────────
+    with st.expander(
+        "Writing context" + (" (set)" if writing_context else " (optional)"),
+        expanded=False,
+    ):
+        st.caption(
+            "Brief for the AI — audience, core argument, style constraints, things to avoid. "
+            "Saved per project and injected into every AI assist call."
+        )
+        _ctx_area = st.text_area(
+            "context",
+            height=110,
+            placeholder=(
+                "e.g.: NSF proposal for the Division of Environmental Biology. "
+                "Audience: program officers with ecology background. "
+                "Main argument: fire return intervals have shortened 40% since 1980. "
+                "Data is correlational — avoid causal language."
+            ),
+            label_visibility="collapsed",
+            key=f"write_ctx_area_{selected_project}",
+        )
+        if st.button("Save context", key=f"write_save_ctx_{selected_project}"):
+            _write_context_path(selected_project).parent.mkdir(parents=True, exist_ok=True)
+            _write_context_path(selected_project).write_text(_ctx_area, encoding="utf-8")
+            st.session_state[_wkey_ctx] = _ctx_area
+            st.success("Writing context saved.")
+
+    # ── Notes history ─────────────────────────────────────────────────────────
+    _notes_path = _write_notes_path(selected_project)
+    if _notes_path.exists() and _notes_path.stat().st_size > 0:
+        with st.expander("Notes history", expanded=False):
+            _notes_text = _notes_path.read_text(encoding="utf-8")
+            st.markdown(_notes_text)
+            _ndl_col, _nclr_col = st.columns([3, 1])
+            _ndl_col.download_button(
+                "Download notes (.md)",
+                data=_notes_text,
+                file_name=f"{selected_project}_write_notes.md",
+                mime="text/markdown",
+                key=f"write_dl_notes_{selected_project}",
+            )
+            if _nclr_col.button("Clear notes", key=f"write_clr_notes_{selected_project}"):
+                _notes_path.write_text("", encoding="utf-8")
+                st.rerun()
+
+    # ── External file sync ────────────────────────────────────────────────────
+    with st.expander("External file sync (network drive)", expanded=False):
+        st.caption(
+            "Read and write your draft directly from a file on a mounted network drive "
+            "or any path the server can reach. The path is saved in write_config.json."
+        )
+        # Use _wkey_extpath as the widget key directly (pre-initialized at startup).
+        # Do NOT pass value= — that would override session state on every rerun.
+        _ext_input = st.text_input(
+            "File path",
+            placeholder=r"e.g. Z:\Projects\grant_background.md or /mnt/network/draft.md",
+            key=_wkey_extpath,
+        )
+        # Persist path change to config whenever the value differs from what was last saved
+        _saved_ext = _load_write_config(selected_project).get("external_file", "")
+        if _ext_input != _saved_ext:
+            _cfg = _load_write_config(selected_project)
+            _cfg["external_file"] = _ext_input
+            _save_write_config(selected_project, _cfg)
+
+        if _ext_input.strip():
+            _ext = Path(_ext_input.strip())
+            # Guard against reads/writes to sensitive files (e.g. .env, SSH keys).
+            # Block any path whose stem starts with a dot or whose suffix is not text-like.
+            _ext_blocked = (
+                _ext.stem.startswith(".")
+                or _ext.suffix.lower() in {".env", ".key", ".pem", ".p12", ".pfx"}
+            )
+            if _ext_blocked:
+                st.error("That path looks like a sensitive system file and cannot be used here.")
+            else:
+                _ec1, _ec2, _ec3 = st.columns(3)
+
+                if _ec1.button("Load from file", key=f"write_ext_load_{selected_project}"):
+                    try:
+                        st.session_state[_wkey_pending] = _ext.read_text(encoding="utf-8")
+                        st.success(f"Loaded from {_ext.name}")
+                        st.rerun()
+                    except OSError as e:
+                        st.error(f"Could not read: {e}")
+
+                if _ec2.button("Save to file", key=f"write_ext_save_{selected_project}"):
+                    try:
+                        _ext.parent.mkdir(parents=True, exist_ok=True)
+                        _ext.write_text(draft_text, encoding="utf-8")
+                        st.success(f"Saved to {_ext.name}")
+                    except OSError as e:
+                        st.error(f"Could not write: {e}")
+
+                if _ec3.button("Save suggestion to file", key=f"write_ext_notes_{selected_project}"):
+                    if not st.session_state.get(_wkey_resp):
+                        st.warning("No AI suggestion to save yet.")
+                    else:
+                        try:
+                            _notes_ext = _ext.with_name(_ext.stem + ".notes.md")
+                            _append_to_notes(
+                                _notes_ext,
+                                mode=st.session_state.get(_wkey_mode, "AI"),
+                                response=st.session_state[_wkey_resp],
+                                draft_snippet=draft_text,
+                            )
+                            st.success(f"Appended to {_notes_ext.name}")
+                        except OSError as e:
+                            st.error(f"Could not write notes: {e}")
