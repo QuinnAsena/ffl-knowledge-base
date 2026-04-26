@@ -4,6 +4,49 @@ A literature search and synthesis tool for the lab. Ask a question in plain Engl
 
 ---
 
+## Why not just use Claude.ai?
+
+It is a fair question. Claude.ai and ChatGPT are extraordinary tools, and for many tasks they are the right choice. But for day-to-day research work — reading your own literature, drafting grants, building evidence tables — they have a structural problem: you cannot trust what they cite.
+
+When you ask Claude.ai to write a grant background on fire return intervals, it draws on its training data: patterns distilled from billions of documents of unknown provenance, with a fixed knowledge cutoff, and no awareness of which papers your lab actually relies on. The citations it produces may be real papers, may be plausible-sounding fabrications, or may be real papers that say something subtly different from what Claude claims. Verifying them is slow and unreliable.
+
+This app is built on a different architecture. Instead of answering from training knowledge, it first searches your ingested paper collection for the most relevant passages, then passes only those passages to Claude and instructs it to answer *from them alone*. If the answer is not in your literature, it says so. Every claim links to a specific page in a specific paper you own. The citation is not a guess — it is the exact chunk of text that generated the answer, and you can read it in one click.
+
+That architectural difference — **retrieval from your curated library rather than synthesis from training data** — is what makes the tool useful for research rather than just impressive.
+
+### How they compare
+
+| | Claude.ai / ChatGPT | This app |
+|---|---|---|
+| **Knowledge source** | Training data — billions of documents, unknown provenance | Your Zotero library only — papers you chose |
+| **Citations** | Approximate; sometimes hallucinated | Exact — author, year, page number; verifiable in one click |
+| **Answers outside your literature** | Yes — draws on all training knowledge | No — refuses rather than guesses |
+| **Retrieval method** | None — answers from memory | Semantic vector search — finds meaning, not just keywords |
+| **Knows your specific papers** | Only if you paste them in each time | Yes — all ingested papers always searchable |
+| **Writing assistance** | General purpose | Research-mode: Challenge, Gap Map, Response to Reviewers |
+| **Session memory** | Resets each conversation | Summarised and re-injected across sessions |
+| **Privacy** | All content processed in the cloud | Papers and embeddings stay on your server |
+
+### Five things this app does that Claude.ai cannot
+
+**1. Find the paper you half-remember.** You know a study showed permafrost carbon release timescales were shorter than models predicted, but you cannot remember the author. Type that paraphrase as a question. Semantic search finds the relevant passage from a paper you ingested a year ago — even if you used completely different words. Claude.ai does not know which papers are in your library.
+
+**2. Challenge your own grant draft against your own evidence.** Paste your Background section into the Write tab and click *Challenge*. The app retrieves passages from your collection and asks Claude to identify every claim that is not supported by your specific literature — not by the internet, not by training data, but by the papers you are actually citing. This is the pre-submission check that takes hours to do manually.
+
+**3. Synthesise across collections at midnight.** You are writing Broader Impacts for your Arctic-NSF proposal and want to know what your JFSP fire literature says about permafrost. Select both collections, ask your question, and get a synthesised answer with citations from both — in seconds. Claude.ai does not know either collection exists.
+
+**4. Build a methods table for 40 papers in ten minutes.** Open the Extract tab, type the fields you want — *study region, sample size, statistical approach, main finding, key limitation* — and click Extract. Every ingested paper is processed in sequence and the results download as a CSV. With Claude.ai you would need to copy-paste each paper individually and prompt for consistent formatting every time.
+
+**5. Draft a background section you can actually submit.** Claude.ai drafts from its training knowledge, which may include retracted work, papers your reviewers will not recognise as relevant, or citations that do not exist. This app drafts exclusively from your collection. Every inline citation is a real chunk you can inspect. Where your literature is thin, it tells you explicitly — *[GAP: insufficient literature on X]* — rather than filling the gap with plausible-sounding speculation.
+
+### What you give up
+
+The constraint is real: this tool cannot answer questions that your ingested papers do not address. It does not know about work published since your last Zotero sync. And when you query the app, the text of the retrieved passages is sent to Anthropic's servers to generate the answer — the same data flow as using Claude.ai directly, though files, embeddings, and chat history stay on your server.
+
+The constraint is also the point. A tool that only answers from sources you have chosen, and tells you when those sources are insufficient, is one you can build research arguments on. The inability to hallucinate is not a bug.
+
+---
+
 ## What this tool is (and isn't)
 
 **It is:** a searchable index of papers and documents that have been deliberately added to the system. Every answer comes from those documents, with citations pointing to the exact source.

@@ -21,8 +21,11 @@ streamlit run app.py
 
 ```bash
 source .venv/Scripts/activate
-python ingest.py --project fire --zotero
-python ingest.py --project alaska --zotero
+
+python ingest.py --project Arctic-NSF --zotero
+python ingest.py --project JFSP --zotero
+# Uncurated has no papers yet — skip it, or drop PDFs manually into projects/Uncurated/pdfs/ and run without --zotero
+
 ```
 
 Re-running is safe — cached PDFs and already-ingested chunks are skipped automatically.
