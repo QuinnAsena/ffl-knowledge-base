@@ -1,0 +1,74 @@
+{
+  "Zhang et al. - 2024 - Current and Future Patterns of Global Wildfire Based on Deep Neural Networks.pdf": {
+    "filename": "Zhang et al. - 2024 - Current and Future Patterns of Global Wildfire Based on Deep Neural Networks.pdf",
+    "title": "Current and Future Patterns of Global Wildfire Based on Deep Neural Networks",
+    "author_str": "Zhang et al.",
+    "year": "2024",
+    "doi": "10.1029/2023EF004088",
+    "source_type": "pdf",
+    "url": ""
+  },
+  "Zhang et al. - 2019 - Forest Fire Susceptibility Modeling Using a Convolutional Neural Network for Yunnan Province of Chin.pdf": {
+    "filename": "Zhang et al. - 2019 - Forest Fire Susceptibility Modeling Using a Convolutional Neural Network for Yunnan Province of Chin.pdf",
+    "title": "Forest Fire Susceptibility Modeling Using a Convolutional Neural Network for Yunnan Province of China",
+    "author_str": "Zhang et al.",
+    "year": "2019",
+    "doi": "10.1007/s13753-019-00233-1",
+    "source_type": "pdf",
+    "url": ""
+  },
+  "Xu et al. - 2025 - Deep learning for wildfire risk prediction Integrating remote sensing and environmental data.pdf": {
+    "filename": "Xu et al. - 2025 - Deep learning for wildfire risk prediction Integrating remote sensing and environmental data.pdf",
+    "title": "Deep learning for wildfire risk prediction: Integrating remote sensing and environmental data",
+    "author_str": "Xu et al.",
+    "year": "2025",
+    "doi": "10.1016/j.isprsjprs.2025.06.002",
+    "source_type": "pdf",
+    "url": ""
+  },
+  "Zhang et al. - 2021 - Learning U-Net without forgetting for near real-time wildfire monitoring by the fusion of SAR and op.pdf": {
+    "filename": "Zhang et al. - 2021 - Learning U-Net without forgetting for near real-time wildfire monitoring by the fusion of SAR and op.pdf",
+    "title": "Learning U-Net without forgetting for near real-time wildfire monitoring by the fusion of SAR and optical time series",
+    "author_str": "Zhang et al.",
+    "year": "2021",
+    "doi": "10.1016/j.rse.2021.112467",
+    "source_type": "pdf",
+    "url": ""
+  },
+  "GRKL6INN.web": {
+    "filename": "GRKL6INN.web",
+    "title": "Deep Learning",
+    "author_str": "",
+    "year": "",
+    "doi": "",
+    "source_type": "web",
+    "url": "https://www.deeplearningbook.org/"
+  },
+  "Di Giuseppe et al. - 2025 - Global data-driven prediction of fire activity.pdf": {
+    "filename": "Di Giuseppe et al. - 2025 - Global data-driven prediction of fire activity.pdf",
+    "title": "Global data-driven prediction of fire activity",
+    "author_str": "Di Giuseppe et al.",
+    "year": "2025",
+    "doi": "10.1038/s41467-025-58097-7",
+    "source_type": "pdf",
+    "url": ""
+  },
+  "McNorton and Di Giuseppe - 2024 - A global fuel characteristic model and dataset for wildfire prediction.pdf": {
+    "filename": "McNorton and Di Giuseppe - 2024 - A global fuel characteristic model and dataset for wildfire prediction.pdf",
+    "title": "A global fuel characteristic model and dataset for wildfire prediction",
+    "author_str": "McNorton et al.",
+    "year": "2024",
+    "doi": "10.5194/bg-21-279-2024",
+    "source_type": "pdf",
+    "url": ""
+  },
+  "Wheatcroft - 2019 - Interpreting the skill score form of forecast performance metrics.pdf": {
+    "filename": "Wheatcroft - 2019 - Interpreting the skill score form of forecast performance metrics.pdf",
+    "title": "Interpreting the skill score form of forecast performance metrics",
+    "author_str": "Wheatcroft",
+    "year": "2019",
+    "doi": "10.1016/j.ijforecast.2018.11.010",
+    "source_type": "pdf",
+    "url": ""
+  }
+}

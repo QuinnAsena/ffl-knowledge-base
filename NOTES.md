@@ -254,6 +254,7 @@ ZOTERO_LIBRARY_TYPE=user    # or "group"
 ## Future features
 
 ### Pending
+- **Section-aware retrieval** — restrict retrieval to specific paper sections (Methods, Results, etc.) so Chat/Draft/Write queries ignore boilerplate Introduction text. Design is complete (see plan at `~/.claude/plans/typed-hugging-garden.md`): section labels detected by regex at ingest time and stored as `section` metadata per chunk; Python post-filter applied after `collection.query()` to avoid native ChromaDB WHERE filters. Implementation was blocked by a persistent segmentation fault in HNSWLIB (C++ native code) on Windows that manifested even when no WHERE filter was issued. Root cause not isolated — likely a Windows/HNSWLIB bug triggered by mixed-schema collections or the version of chromadb in use. To revisit: (1) try on Mac/Linux server where segfaults are less common and easier to backtrace; (2) check if a newer chromadb version resolves it; (3) consider storing section as part of the chunk text prefix rather than as metadata.
 - **Figure caption writer** — describe a figure, get a publication-quality caption in the style of the current manuscript section.
 - **Email and letter drafts** — outreach mode extended to professional correspondence: grant inquiry letters, collaboration proposals, cover letters.
 - **Literature review outline** — given a research question, generate a thematic outline with suggested section headings and papers mapped to each.

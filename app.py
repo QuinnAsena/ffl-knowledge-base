@@ -29,10 +29,12 @@ from query import (
     annotate_paper,
     assist_writing,
     assist_writing_multi,
+    clear_session_usage,
     draft,
     draft_multi,
     extract_fields_from_paper,
     extract_themes,
+    get_session_usage,
     query,
     query_multi,
     refine_draft,
@@ -638,6 +640,20 @@ with st.sidebar:
             ),
         )
 
+        _SECTION_OPTIONS = ["abstract", "introduction", "methods", "results", "discussion", "conclusion"]
+        _raw_sections = st.multiselect(
+            "Search sections",
+            options=_SECTION_OPTIONS,
+            default=[],
+            format_func=str.capitalize,
+            help=(
+                "Restrict retrieval to specific paper sections. Leave empty to search all sections (default). "
+                "Re-ingest documents after enabling this feature to apply section labels."
+            ),
+            key="section_filter",
+        )
+        section_filter: list[str] | None = _raw_sections or None
+
         max_draft_tokens = st.select_slider(
             "Max draft length (tokens)",
             options=[1024, 2048, 4096, 6144, 8192],
@@ -657,6 +673,34 @@ with st.sidebar:
                 "Scores above ~0.6 indicate strong relevance; below ~0.4 the match may be weak."
             ),
         )
+
+    _usage = get_session_usage()
+    if _usage:
+        _PRICES = {
+            "claude-haiku-4-5-20251001": (0.80, 4.00),
+            "claude-sonnet-4-6":         (3.00, 15.00),
+            "claude-opus-4-7":           (15.00, 75.00),
+        }
+        _total_in  = sum(u["input"]  for u in _usage)
+        _total_out = sum(u["output"] for u in _usage)
+        _total_cost = sum(
+            u["input"]  / 1_000_000 * _PRICES.get(u["model"], (3.00, 15.00))[0]
+            + u["output"] / 1_000_000 * _PRICES.get(u["model"], (3.00, 15.00))[1]
+            for u in _usage
+        )
+        st.markdown("---")
+        with st.expander(f"Session usage ({len(_usage)} call(s))"):
+            _uc1, _uc2 = st.columns(2)
+            _uc1.metric("Tokens in",  f"{_total_in:,}")
+            _uc2.metric("Tokens out", f"{_total_out:,}")
+            st.metric("Est. cost", f"${_total_cost:.4f}")
+            st.caption(
+                "Haiku $0.80/$4 · Sonnet $3/$15 · Opus $15/$75 per M tokens. "
+                "Verify at console.anthropic.com."
+            )
+            if st.button("Reset counter", key="reset_usage"):
+                clear_session_usage()
+                st.rerun()
 
 # ── Session state ─────────────────────────────────────────────────────────────
 
@@ -743,16 +787,18 @@ with tab_chat:
             with st.spinner("Searching documents and generating answer…"):
                 try:
                     if len(active_projects_chat) > 1:
-                        answer, citations, scores = query_multi(
+                        answer, citations, scores, _chat_fallback = query_multi(
                             active_projects_chat, prompt,
                             prior_context=_prior_context,
                             model=claude_model, temperature=temperature,
+                            sections=section_filter,
                         )
                     else:
-                        answer, citations, scores = query(
+                        answer, citations, scores, _chat_fallback = query(
                             selected_project, prompt,
                             prior_context=_prior_context,
                             model=claude_model, temperature=temperature,
+                            sections=section_filter,
                         )
                 except ValueError as e:
                     st.error(str(e))
@@ -762,6 +808,11 @@ with tab_chat:
                     st.stop()
 
             st.markdown(answer)
+            if section_filter and _chat_fallback:
+                st.warning(
+                    f"No chunks matched the selected section(s) ({', '.join(section_filter)}). "
+                    "Showing results from all sections instead."
+                )
             if citations:
                 with st.expander("Source chunks retrieved", expanded=False):
                     for ref, score in zip(citations, scores):
@@ -1034,26 +1085,33 @@ with tab_draft:
             with st.spinner("Retrieving literature and drafting section…"):
                 try:
                     if len(active_projects_draft) > 1:
-                        draft_text, draft_citations = draft_multi(
+                        draft_text, draft_citations, _draft_fallback = draft_multi(
                             active_projects_draft, full_prompt, mode["system_prompt"], retrieval_k,
                             model=claude_model, temperature=temperature, max_tokens=max_draft_tokens,
+                            sections=section_filter,
                         )
                     else:
-                        draft_text, draft_citations = draft(
+                        draft_text, draft_citations, _draft_fallback = draft(
                             selected_project, full_prompt, mode["system_prompt"], retrieval_k,
                             model=claude_model, temperature=temperature, max_tokens=max_draft_tokens,
+                            sections=section_filter,
                         )
                 except ValueError as e:
                     st.error(str(e))
-                    draft_text, draft_citations = None, []
+                    draft_text, draft_citations, _draft_fallback = None, [], False
                 except Exception as exc:
                     st.error(f"An error occurred: {exc}")
-                    draft_text, draft_citations = None, []
+                    draft_text, draft_citations, _draft_fallback = None, [], False
 
             if draft_text:
                 st.session_state[f"draft_text_{selected_project}"] = draft_text
                 st.session_state[f"draft_citations_{selected_project}"] = draft_citations
                 st.session_state[f"draft_section_{selected_project}"] = section_type
+                if section_filter and _draft_fallback:
+                    st.warning(
+                        f"No chunks matched the selected section(s) ({', '.join(section_filter)}). "
+                        "Showing results from all sections instead."
+                    )
 
     # ── Display current draft (persists across refine cycles) ─────────────────
     draft_key = f"draft_text_{selected_project}"
@@ -1401,6 +1459,11 @@ with tab_write:
                     st.session_state[_wkey_rpane] = "Preview"
                     st.rerun()
 
+                if section_filter and st.session_state.get(f"_write_fallback_{selected_project}"):
+                    st.warning(
+                        f"No chunks matched the selected section(s) ({', '.join(section_filter)}). "
+                        "Showing results from all sections instead."
+                    )
                 st.markdown(st.session_state[_wkey_resp])
 
                 if st.session_state[_wkey_cites]:
@@ -1452,7 +1515,7 @@ with tab_write:
                 with st.spinner(f"Asking AI ({_selected_mode})…"):
                     try:
                         if len(_write_projects) > 1:
-                            _resp, _cites, _ = assist_writing_multi(
+                            _resp, _cites, _, _write_fallback = assist_writing_multi(
                                 projects=_write_projects,
                                 document_text=draft_text,
                                 mode=_selected_mode,
@@ -1461,9 +1524,10 @@ with tab_write:
                                 top_k=retrieval_k,
                                 model=claude_model,
                                 temperature=temperature,
+                                sections=section_filter,
                             )
                         else:
-                            _resp, _cites, _ = assist_writing(
+                            _resp, _cites, _, _write_fallback = assist_writing(
                                 project=selected_project,
                                 document_text=draft_text,
                                 mode=_selected_mode,
@@ -1472,6 +1536,7 @@ with tab_write:
                                 top_k=retrieval_k,
                                 model=claude_model,
                                 temperature=temperature,
+                                sections=section_filter,
                             )
                         st.session_state[_wkey_resp]  = _resp
                         st.session_state[_wkey_cites] = _cites
@@ -1479,6 +1544,7 @@ with tab_write:
                         st.session_state[_wkey_cmode] = _selected_mode
                         st.session_state[_wkey_cproj] = _write_projects
                         st.session_state[_wkey_cctx]  = writing_context
+                        st.session_state[f"_write_fallback_{selected_project}"] = _write_fallback
                         # Signal the right pane to switch on next render
                         st.session_state[_wkey_rswitch] = True
                     except Exception as e:

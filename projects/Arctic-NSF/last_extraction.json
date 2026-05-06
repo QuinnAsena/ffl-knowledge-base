@@ -1,0 +1,105 @@
+{
+  "fields": [
+    "study region",
+    "target species",
+    "spatial scale"
+  ],
+  "results": [
+    {
+      "Paper": "Lara et al. (2025)",
+      "study region": "Alaska",
+      "target species": "peatlands",
+      "spatial scale": "20 m spatial resolution, wall-to-wall ~1.5 million km\u00b2"
+    },
+    {
+      "Paper": "Abatzoglou et al. (2025)",
+      "study region": "Global forests, with case studies in SE Asia, Amazon, Siberia, Mediterranean, SE Australia, Western US, Chile, and Canada",
+      "target species": "\u2014",
+      "spatial scale": "Global (forested ecoregions worldwide)"
+    },
+    {
+      "Paper": "Rammer et al. (2024)",
+      "study region": "\u2014",
+      "target species": "\u2014",
+      "spatial scale": "from individual trees to landscapes of 10^5 hectares"
+    },
+    {
+      "Paper": "Thom et al. (2024)",
+      "study region": "Europe, North America, and Asia (Northern Hemisphere)",
+      "target species": "150 temperate and boreal tree species and provenances",
+      "spatial scale": "multiple spatial scales (individual-tree level to forest landscape)"
+    },
+    {
+      "Paper": "Hansen et al. (2023)",
+      "study region": "interior Alaska",
+      "target species": "\u2014",
+      "spatial scale": "stands (1 ha) to landscapes (61,000 ha)"
+    },
+    {
+      "Paper": "Hansen et al. (2021)",
+      "study region": "Interior Alaska, USA (North American boreal biome)",
+      "target species": "Black spruce (Picea mariana), trembling aspen (Populus tremuloides), Alaskan birch (Betula neoalaskana)",
+      "spatial scale": "Regional (~450,000 km\u00b2 Alaskan boreal forest)"
+    },
+    {
+      "Paper": "Mack et al. (2021)",
+      "study region": "Interior Alaska",
+      "target species": "black spruce (Picea mariana), aspen (Populus tremuloides), birch (Betula neoalaskana)",
+      "spatial scale": "250,000 km\u00b2 region in Interior Alaska"
+    },
+    {
+      "Paper": "Baltzer et al. (2021)",
+      "study region": "boreal North America",
+      "target species": "black spruce (Picea mariana)",
+      "spatial scale": "continent-wide (637 million ha of forested land, 37% of the boreal biome), with 1,538 field sites across boreal North America"
+    },
+    {
+      "Paper": "Wang et al. (2020)",
+      "study region": "Arctic\u2013Boreal Northwestern North America (Alaska and western Canada), covering 4.7 \u00d7 10^6 km\u00b2",
+      "target species": "\u2014",
+      "spatial scale": "4.7 \u00d7 10^6 km\u00b2 at 30 m spatial resolution"
+    },
+    {
+      "Paper": "Johnstone et al. (2020)",
+      "study region": "Interior Alaska, USA (boreal forests north of the Alaska Range and south of the Brooks Range)",
+      "target species": "Black spruce (Picea mariana), trembling aspen (Populus tremuloides), Alaskan paper birch (Betula neoalaskana), white spruce (Picea glauca), balsam poplar (Populus balsamifera)",
+      "spatial scale": "Landscape scale; 89 plots across a broad N-S gradient in Interior Alaska"
+    },
+    {
+      "Paper": "Hart et al. (2019)",
+      "study region": "Boreal Shield of Saskatchewan, Canada",
+      "target species": "boreal forest tree species including black spruce (Picea mariana), jack pine (Pinus spp.), aspen (Populus tremuloides), and birch (Betula spp.)",
+      "spatial scale": "landscape scale"
+    },
+    {
+      "Paper": "Wheatcroft (2019)",
+      "study region": "\u2014",
+      "target species": "\u2014",
+      "spatial scale": "\u2014"
+    },
+    {
+      "Paper": "Johnstone et al. (2016)",
+      "study region": "North America (primarily), with examples including New Zealand",
+      "target species": "forest species (including Pinus, Banksia, and shade-tolerant species)",
+      "spatial scale": "stand to landscape scale (ranging from patch-scale to broad landscapes)"
+    },
+    {
+      "Paper": "Mann et al. (2012)",
+      "study region": "Interior Alaska, USA",
+      "target species": "Black spruce (Picea mariana), white spruce (Picea glauca), aspen (Populus tremuloides), birch (Betula neoalaskana)",
+      "spatial scale": "Regional (approximately 47 million ha)"
+    },
+    {
+      "Paper": "Nitschke et al. (2008)",
+      "study region": "south-central British Columbia, Canada (interior Douglas-fir ecosystem)",
+      "target species": "tree species within the interior Douglas-fir ecosystem",
+      "spatial scale": "individual tree to ecosystem (aspatial/patch-level model)"
+    },
+    {
+      "Paper": "GRKL6INN.web",
+      "study region": "\u2014",
+      "target species": "\u2014",
+      "spatial scale": "\u2014"
+    }
+  ]
+}

@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -28,6 +29,36 @@ CHUNK_SIZE = 512
 CHUNK_OVERLAP = 50
 EMBED_MODEL = "all-MiniLM-L6-v2"
 CHROMA_DIR = "chroma_db"
+
+# ── Section detection ─────────────────────────────────────────────────────────
+
+_SECTION_PATTERNS: list[tuple[str, str]] = [
+    ("abstract",     r"^\s*abstract\s*$"),
+    ("introduction", r"^\s*(?:\d+[\.\s]+)?introduction\s*$"),
+    ("methods",      r"^\s*(?:\d+[\.\s]+)?(?:materials?\s+and\s+)?methods?(?:\s+and\s+materials?)?\s*$"),
+    ("methods",      r"^\s*(?:\d+[\.\s]+)?(?:study\s+)?(?:area|site|design|system|approach)\s*$"),
+    ("methods",      r"^\s*(?:\d+[\.\s]+)?(?:experimental\s+(?:design|setup)|data\s+(?:collection|analysis)|statistical\s+(?:analysis|methods?))\s*$"),
+    ("results",      r"^\s*(?:\d+[\.\s]+)?results?\s*$"),
+    ("results",      r"^\s*(?:\d+[\.\s]+)?results?\s+and\s+discussion\s*$"),
+    ("results",      r"^\s*(?:\d+[\.\s]+)?findings?\s*$"),
+    ("discussion",   r"^\s*(?:\d+[\.\s]+)?discussion\s*$"),
+    ("conclusion",   r"^\s*(?:\d+[\.\s]+)?conclusions?\s*$"),
+    ("references",   r"^\s*(?:\d+[\.\s]+)?(?:references?|literature\s+cited|bibliography)\s*$"),
+]
+_SECTION_RE = [(label, re.compile(pat, re.IGNORECASE)) for label, pat in _SECTION_PATTERNS]
+
+
+def detect_section(text: str, current: str) -> str:
+    """Scan text lines for a section header; return the matched label or current unchanged."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or len(stripped) > 80:
+            continue
+        for label, pattern in _SECTION_RE:
+            if pattern.match(stripped):
+                return label
+    return current
+
 
 # ── PDF helpers ───────────────────────────────────────────────────────────────
 
@@ -344,8 +375,10 @@ def ingest(project: str, use_zotero: bool = False) -> None:
                 continue
 
         item_added = 0
+        current_section = "other"
 
         for page_data in pages:
+            current_section = detect_section(page_data["text"], current_section)
             raw_chunks = chunk_text(page_data["text"], chunk_size, chunk_overlap)
             ids, documents, embeddings, metadatas = [], [], [], []
 
@@ -368,6 +401,7 @@ def ingest(project: str, use_zotero: bool = False) -> None:
                         "doi": item.get("doi", ""),
                         "source_type": item.get("content_type", "pdf"),
                         "url": item.get("url", ""),
+                        "section": current_section,
                     }
                 )
                 existing_ids.add(chunk_id)

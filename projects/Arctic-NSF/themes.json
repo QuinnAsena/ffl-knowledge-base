@@ -1,0 +1,98 @@
+{
+  "Lara et al. - 2025 - A 20 m spatial resolution peatland extent map of Alaska.pdf": {
+    "peatland mapping": 1.0,
+    "remote sensing methods": 0.9,
+    "machine learning classification": 0.7,
+    "arctic boreal ecosystems": 0.6
+  },
+  "Abatzoglou et al. - 2025 - Climate change has increased the odds of extreme regional forest fire years globally.pdf": {
+    "extreme wildfire events": 0.95,
+    "climate change attribution": 0.85,
+    "fire weather indices": 0.8,
+    "global forest ecology": 0.5
+  },
+  "Rammer et al. - 2024 - The individual-based forest landscape and disturbance model iLand Overview, progress, and outlook.pdf": {
+    "forest landscape modeling": 1.0,
+    "forest disturbance dynamics": 0.8,
+    "individual-based simulation": 0.9,
+    "climate change forest impacts": 0.6
+  },
+  "Thom et al. - 2024 - Parameters of 150 temperate and boreal tree species and provenances for an individual-based forest l.pdf": {
+    "forest ecosystem modeling": 0.95,
+    "tree species parameterization": 0.95,
+    "forest disturbance dynamics": 0.6,
+    "boreal and temperate forests": 0.5
+  },
+  "Hansen et al. - 2023 - The Permafrost and Organic LayEr module for Forest Models (POLE-FM) 1.0.pdf": {
+    "boreal forest dynamics": 0.9,
+    "permafrost soil modeling": 1.0,
+    "forest landscape simulation": 0.8,
+    "soil organic layer carbon": 0.6
+  },
+  "Hansen et al. - 2021 - An alternate vegetation type proves resilient and persists for decades following forest conversion i.pdf": {
+    "boreal forest dynamics": 0.9,
+    "vegetation state transitions": 0.85,
+    "wildfire disturbance ecology": 0.75,
+    "process-based simulation modelling": 0.65
+  },
+  "Mack et al. - 2021 - Carbon loss from boreal forest wildfires offset by increased dominance of deciduous trees.pdf": {
+    "boreal forest carbon cycling": 0.95,
+    "wildfire disturbance ecology": 0.9,
+    "vegetation succession dynamics": 0.75,
+    "climate-carbon feedbacks": 0.6
+  },
+  "Baltzer et al. - 2021 - Increasing fire and the decline of fire adapted black spruce in the boreal forest.pdf": {
+    "boreal forest ecology": 0.95,
+    "wildfire disturbance regimes": 0.9,
+    "forest regeneration dynamics": 0.85,
+    "climate change vegetation shifts": 0.75
+  },
+  "Wang et al. - 2020 - Extensive land cover change across Arctic\u2013Boreal Northwestern North America from disturbance and cli.pdf": {
+    "arctic-boreal land cover change": 0.95,
+    "remote sensing vegetation mapping": 0.85,
+    "climate-driven ecosystem change": 0.75,
+    "wildfire disturbance ecology": 0.6
+  },
+  "Johnstone et al. - 2020 - Factors shaping alternate successional trajectories in burned black spruce forests of Alaska.pdf": {
+    "boreal forest succession": 0.95,
+    "fire ecology": 0.9,
+    "post-fire regeneration": 0.85,
+    "vegetation state transitions": 0.7
+  },
+  "Hart et al. - 2019 - Examining forest resilience to changing fire frequency in a fire-prone region of boreal forest.pdf": {
+    "boreal fire ecology": 0.95,
+    "forest resilience and succession": 0.85,
+    "vegetation-fire feedbacks": 0.8,
+    "climate change disturbance": 0.6
+  },
+  "Wheatcroft - 2019 - Interpreting the skill score form of forecast performance metrics.pdf": {
+    "forecast evaluation metrics": 0.95,
+    "probabilistic forecasting": 0.85,
+    "scoring rules": 0.9,
+    "weather forecasting methods": 0.4
+  },
+  "Johnstone et al. - 2016 - Changing disturbance regimes, ecological memory, and forest resilience.pdf": {
+    "forest disturbance ecology": 1.0,
+    "ecological resilience": 0.9,
+    "disturbance regimes": 0.85,
+    "climate change impacts": 0.5
+  },
+  "Mann et al. - 2012 - Is Alaska\u2019s Boreal Forest Now Crossing a Major Ecological Threshold.pdf": {
+    "boreal forest ecology": 0.95,
+    "wildfire disturbance dynamics": 0.85,
+    "climate change vegetation response": 0.9,
+    "carbon cycling permafrost": 0.6
+  },
+  "Nitschke and Innes - 2008 - A tree and climate assessment tool for modelling ecosystem response to climate change.pdf": {
+    "forest ecosystem modelling": 0.95,
+    "climate change vulnerability": 0.9,
+    "tree species distribution": 0.75,
+    "regeneration niche theory": 0.7
+  },
+  "GRKL6INN.web": {
+    "deep learning": 1.0,
+    "machine learning education": 0.8,
+    "neural network theory": 0.5,
+    "academic publishing": 0.3
+  }
+}

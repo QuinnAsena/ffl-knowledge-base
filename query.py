@@ -277,6 +277,54 @@ def _get_embed_model() -> SentenceTransformer:
     return SentenceTransformer(EMBED_MODEL)
 
 
+# ── Usage tracking ────────────────────────────────────────────────────────────
+
+_session_usage: list[dict] = []
+
+
+def _log_usage(fn: str, model: str, usage) -> None:
+    _session_usage.append({
+        "fn": fn,
+        "model": model,
+        "input": usage.input_tokens,
+        "output": usage.output_tokens,
+    })
+
+
+def get_session_usage() -> list[dict]:
+    return list(_session_usage)
+
+
+def clear_session_usage() -> None:
+    _session_usage.clear()
+
+
+def _filter_by_section(results: dict, sections: list[str] | None, top_k: int) -> tuple[dict, bool]:
+    """Post-filter query results to the requested sections.
+
+    Returns (filtered_results, fallback_used). fallback_used is True when no
+    chunks matched the filter and the original unfiltered results were returned.
+    Never uses ChromaDB WHERE clauses — pure Python over already-fetched data.
+    """
+    if not sections:
+        return results, False
+    docs  = results["documents"][0]
+    metas = results["metadatas"][0]
+    dists = results["distances"][0]
+    kept = [
+        (d, m, s) for d, m, s in zip(docs, metas, dists)
+        if m.get("section", "other") in sections
+    ]
+    if not kept:
+        return results, True
+    docs_f, metas_f, dists_f = zip(*kept[:top_k])
+    return {
+        "documents": [list(docs_f)],
+        "metadatas": [list(metas_f)],
+        "distances": [list(dists_f)],
+    }, False
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
@@ -304,6 +352,7 @@ def summarise_conversation(messages: list) -> str:
         system=MEMORY_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": convo_text}],
     )
+    _log_usage("summarise", CLAUDE_MODEL, message.usage)
     return message.content[0].text.strip()
 
 
@@ -314,7 +363,8 @@ def query(
     model: str = CLAUDE_MODEL,
     temperature: float = 0.3,
     max_tokens: int = 1024,
-) -> tuple[str, list[str], list[float]]:
+    sections: list[str] | None = None,
+) -> tuple[str, list[str], list[float], bool]:
     """
     Run a RAG query against a project collection.
 
@@ -343,11 +393,13 @@ def query(
     embed_model = _get_embed_model()
     q_embedding = embed_model.encode(question, normalize_embeddings=True).tolist()
 
+    _fetch_k = TOP_K * 3 if sections else TOP_K
     results = collection.query(
         query_embeddings=[q_embedding],
-        n_results=min(TOP_K, collection.count()),
+        n_results=min(_fetch_k, collection.count()),
         include=["documents", "metadatas", "distances"],
     )
+    results, fallback_used = _filter_by_section(results, sections, TOP_K)
 
     context = format_context(results)
     citations, scores = format_citations_and_scores(results)
@@ -370,8 +422,8 @@ def query(
         system=system,
         messages=[{"role": "user", "content": build_user_message(question, context)}],
     )
-
-    return message.content[0].text, citations, scores
+    _log_usage("query", model, message.usage)
+    return message.content[0].text, citations, scores, fallback_used
 
 
 def draft(
@@ -382,7 +434,8 @@ def draft(
     model: str = CLAUDE_MODEL,
     temperature: float = 0.4,
     max_tokens: int = 2048,
-) -> tuple[str, list[str]]:
+    sections: list[str] | None = None,
+) -> tuple[str, list[str], bool]:
     """
     Generate a written section grounded in the project literature.
 
@@ -413,11 +466,13 @@ def draft(
     embed_model = _get_embed_model()
     q_embedding = embed_model.encode(prompt, normalize_embeddings=True).tolist()
 
+    _fetch_k = top_k * 3 if sections else top_k
     results = collection.query(
         query_embeddings=[q_embedding],
-        n_results=min(top_k, collection.count()),
+        n_results=min(_fetch_k, collection.count()),
         include=["documents", "metadatas", "distances"],
     )
+    results, fallback_used = _filter_by_section(results, sections, top_k)
 
     context = format_context(results)
     citations = format_citations(results)
@@ -434,8 +489,8 @@ def draft(
         system=system_prompt,
         messages=[{"role": "user", "content": build_user_message(prompt, context)}],
     )
-
-    return message.content[0].text, citations
+    _log_usage("draft", model, message.usage)
+    return message.content[0].text, citations, fallback_used
 
 
 def _merge_results(
@@ -480,7 +535,8 @@ def query_multi(
     model: str = CLAUDE_MODEL,
     temperature: float = 0.3,
     max_tokens: int = 1024,
-) -> tuple[str, list[str], list[float]]:
+    sections: list[str] | None = None,
+) -> tuple[str, list[str], list[float], bool]:
     """
     Query across multiple project collections and synthesise a single answer.
 
@@ -491,7 +547,9 @@ def query_multi(
 
     embed_model = _get_embed_model()
     q_embedding = embed_model.encode(question, normalize_embeddings=True).tolist()
-    results = _merge_results(projects, q_embedding, TOP_K)
+    _fetch_k = TOP_K * 3 if sections else TOP_K
+    results = _merge_results(projects, q_embedding, _fetch_k)
+    results, fallback_used = _filter_by_section(results, sections, TOP_K)
 
     if not results["documents"][0]:
         raise ValueError(
@@ -520,7 +578,8 @@ def query_multi(
         system=system,
         messages=[{"role": "user", "content": build_user_message(question, context)}],
     )
-    return message.content[0].text, citations, scores
+    _log_usage("query", model, message.usage)
+    return message.content[0].text, citations, scores, fallback_used
 
 
 def draft_multi(
@@ -531,7 +590,8 @@ def draft_multi(
     model: str = CLAUDE_MODEL,
     temperature: float = 0.4,
     max_tokens: int = 2048,
-) -> tuple[str, list[str]]:
+    sections: list[str] | None = None,
+) -> tuple[str, list[str], bool]:
     """
     Draft a section drawing from multiple project collections.
 
@@ -542,7 +602,9 @@ def draft_multi(
 
     embed_model = _get_embed_model()
     q_embedding = embed_model.encode(prompt, normalize_embeddings=True).tolist()
-    results = _merge_results(projects, q_embedding, top_k)
+    _fetch_k = top_k * 3 if sections else top_k
+    results = _merge_results(projects, q_embedding, _fetch_k)
+    results, fallback_used = _filter_by_section(results, sections, top_k)
 
     if not results["documents"][0]:
         raise ValueError(
@@ -565,7 +627,8 @@ def draft_multi(
         system=system_prompt,
         messages=[{"role": "user", "content": build_user_message(prompt, context)}],
     )
-    return message.content[0].text, citations
+    _log_usage("draft", model, message.usage)
+    return message.content[0].text, citations, fallback_used
 
 
 def refine_draft(current_draft: str, instruction: str) -> str:
@@ -595,6 +658,7 @@ def refine_draft(current_draft: str, instruction: str) -> str:
         system=REFINE_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_msg}],
     )
+    _log_usage("refine", CLAUDE_MODEL, message.usage)
     return message.content[0].text
 
 
@@ -650,6 +714,7 @@ def extract_themes(project: str, filename: str, model: str = CLAUDE_MODEL) -> di
 
     if message is None:
         return {}
+    _log_usage("extract_themes", model, message.usage)
     raw = message.content[0].text.strip()
     raw = re.sub(r"^```[a-z]*\n?", "", raw)
     raw = re.sub(r"\n?```$", "", raw).strip()
@@ -713,6 +778,7 @@ def annotate_paper(project: str, filename: str) -> str:
         system=ANNOTATION_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": context}],
     )
+    _log_usage("annotate", CLAUDE_MODEL, message.usage)
     return message.content[0].text
 
 
@@ -774,6 +840,7 @@ def extract_fields_from_paper(
 
     if message is None:
         return {f: "—" for f in fields}
+    _log_usage("extract_fields", CLAUDE_MODEL, message.usage)
     raw = message.content[0].text.strip()
 
     # Strip markdown code fences Claude sometimes adds despite instructions
@@ -810,7 +877,8 @@ def assist_writing(
     model: str = CLAUDE_MODEL,
     temperature: float = 0.4,
     max_tokens: int = 1024,
-) -> tuple[str, list[str], list[float]]:
+    sections: list[str] | None = None,
+) -> tuple[str, list[str], list[float], bool]:
     """
     Provide AI assistance on a draft in progress.
 
@@ -845,11 +913,13 @@ def assist_writing(
     query_text = document_text[:500] if document_text.strip() else mode
     q_embedding = embed_model.encode(query_text, normalize_embeddings=True).tolist()
 
+    _fetch_k = top_k * 3 if sections else top_k
     results = collection.query(
         query_embeddings=[q_embedding],
-        n_results=min(top_k, collection.count()),
+        n_results=min(_fetch_k, collection.count()),
         include=["documents", "metadatas", "distances"],
     )
+    results, fallback_used = _filter_by_section(results, sections, top_k)
 
     context = format_context(results)
     citations, scores = format_citations_and_scores(results)
@@ -886,7 +956,8 @@ def assist_writing(
                 time.sleep(65)
             else:
                 raise
-    return message.content[0].text, citations, scores
+    _log_usage("write_assist", model, message.usage)
+    return message.content[0].text, citations, scores, fallback_used
 
 
 def assist_writing_multi(
@@ -899,7 +970,8 @@ def assist_writing_multi(
     model: str = CLAUDE_MODEL,
     temperature: float = 0.4,
     max_tokens: int = 1024,
-) -> tuple[str, list[str], list[float]]:
+    sections: list[str] | None = None,
+) -> tuple[str, list[str], list[float], bool]:
     """
     Provide AI writing assistance drawing from multiple project collections.
 
@@ -912,7 +984,9 @@ def assist_writing_multi(
     embed_model = _get_embed_model()
     query_text = document_text[:500] if document_text.strip() else mode
     q_embedding = embed_model.encode(query_text, normalize_embeddings=True).tolist()
-    results = _merge_results(projects, q_embedding, top_k)
+    _fetch_k = top_k * 3 if sections else top_k
+    results = _merge_results(projects, q_embedding, _fetch_k)
+    results, fallback_used = _filter_by_section(results, sections, top_k)
 
     if not results["documents"][0]:
         raise ValueError(
@@ -955,7 +1029,8 @@ def assist_writing_multi(
                 time.sleep(65)
             else:
                 raise
-    return message.content[0].text, citations, scores
+    _log_usage("write_assist", model, message.usage)
+    return message.content[0].text, citations, scores, fallback_used
 
 
 if __name__ == "__main__":
@@ -965,7 +1040,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     try:
-        answer, citations, _ = query(args.project, args.question)
+        answer, citations, _, _fallback = query(args.project, args.question)
     except ValueError as e:
         print(f"[error] {e}")
         sys.exit(1)
