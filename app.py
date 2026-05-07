@@ -22,6 +22,7 @@ load_dotenv()
 from query import (
     CHROMA_DIR,
     DRAFT_SYSTEM_PROMPT,
+    USAGE_LOG,
     GAP_MAP_SYSTEM_PROMPT,
     OUTREACH_SYSTEM_PROMPT,
     PAPER_SYSTEM_PROMPT,
@@ -29,10 +30,12 @@ from query import (
     annotate_paper,
     assist_writing,
     assist_writing_multi,
+    clear_session_usage,
     draft,
     draft_multi,
     extract_fields_from_paper,
     extract_themes,
+    get_session_usage,
     query,
     query_multi,
     refine_draft,
@@ -651,12 +654,57 @@ with st.sidebar:
 
         show_scores = st.toggle(
             "Show retrieval scores",
-            value=False,
+            value=True,
             help=(
                 "Display cosine similarity scores (0–1) next to source chunks. "
                 "Scores above ~0.6 indicate strong relevance; below ~0.4 the match may be weak."
             ),
         )
+
+    _usage = get_session_usage()
+    _PRICES = {
+        "claude-haiku-4-5-20251001": (0.80, 4.00),
+        "claude-sonnet-4-6":         (3.00, 15.00),
+        "claude-opus-4-7":           (15.00, 75.00),
+    }
+
+    def _calc_cost(entries):
+        return sum(
+            u["input"]  / 1_000_000 * _PRICES.get(u["model"], (3.00, 15.00))[0]
+            + u["output"] / 1_000_000 * _PRICES.get(u["model"], (3.00, 15.00))[1]
+            for u in entries
+        )
+
+    _all_time = []
+    try:
+        with open(USAGE_LOG, encoding="utf-8") as _f:
+            _all_time = [json.loads(line) for line in _f if line.strip()]
+    except FileNotFoundError:
+        pass
+
+    if _usage or _all_time:
+        st.markdown("---")
+        with st.expander(f"Session usage ({len(_usage)} call(s))"):
+            if _usage:
+                _uc1, _uc2 = st.columns(2)
+                _uc1.metric("Tokens in",  f"{sum(u['input']  for u in _usage):,}")
+                _uc2.metric("Tokens out", f"{sum(u['output'] for u in _usage):,}")
+                st.metric("Est. cost", f"${_calc_cost(_usage):.4f}")
+            else:
+                st.caption("No calls yet this session.")
+
+            if _all_time:
+                st.markdown("**All time**")
+                _ac1, _ac2 = st.columns(2)
+                _ac1.metric("Tokens in",  f"{sum(u['input']  for u in _all_time):,}")
+                _ac2.metric("Tokens out", f"{sum(u['output'] for u in _all_time):,}")
+                st.metric("Est. cost", f"${_calc_cost(_all_time):.4f}")
+                st.caption(f"{len(_all_time)} total calls since log started.")
+
+            st.caption("Haiku $0.80/$4 · Sonnet $3/$15 · Opus $15/$75 per M tokens. Verify at console.anthropic.com.")
+            if st.button("Reset session counter", key="reset_usage"):
+                clear_session_usage()
+                st.rerun()
 
 # ── Session state ─────────────────────────────────────────────────────────────
 

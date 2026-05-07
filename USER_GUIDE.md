@@ -239,6 +239,16 @@ Open the **Advanced settings** expander in the sidebar to fine-tune every call.
 | **Max draft length** | Maximum tokens in generated drafts. Raise to 4 096+ for long grant sections. |
 | **Show retrieval scores** | Displays cosine similarity (0–1) next to each source chunk in Chat answers. |
 
+### Session usage tracker
+
+After you make your first API call, a **Session usage** expander appears at the bottom of the sidebar showing:
+
+- **Tokens in / Tokens out** — cumulative token counts for all calls since the app started
+- **Est. cost** — estimated USD cost based on published Anthropic pricing (Haiku $0.80/$4.00 · Sonnet $3.00/$15.00 · Opus $15.00/$75.00 per million tokens input/output)
+- **Reset counter** — clears the running totals for the current session
+
+The counter accumulates across all tabs and all call types (Chat, Draft, Extract, Graph tagging, Write). It resets automatically when the app server restarts. Use it to get a feel for the cost of different workflows — for example, a single Chat query typically costs a fraction of a cent, while running Extract across 30 papers at Opus pricing can add up to a few dollars.
+
 #### Setting details
 
 - **Claude model** — All three models read the same retrieved passages and follow the same instructions; the difference is reasoning quality and cost. Haiku 4.5 is roughly 10–15× cheaper than Opus 4.7 and responds in seconds — well suited to quick factual queries, annotation runs, and field extraction where the task is reading comprehension rather than synthesis. Sonnet 4.6 is the recommended default: it handles nuanced academic writing, complex gap maps, and multi-source synthesis well at a reasonable cost. Opus 4.7 is meaningfully better at weighing ambiguous or conflicting evidence, constructing rigorous arguments, and producing polished prose — worth using for final grant sections or a Response to Reviewers letter where quality justifies the cost.
