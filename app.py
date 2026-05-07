@@ -27,6 +27,7 @@ from query import (
     OUTREACH_SYSTEM_PROMPT,
     PAPER_SYSTEM_PROMPT,
     REVIEWER_SYSTEM_PROMPT,
+    _get_chroma_client,
     annotate_paper,
     assist_writing,
     assist_writing_multi,
@@ -39,7 +40,9 @@ from query import (
     query,
     query_multi,
     refine_draft,
+    screen_paper,
     summarise_conversation,
+    synthesise_review,
 )
 
 
@@ -100,7 +103,7 @@ def get_document_index(project: str) -> list[dict]:
     Returns a list of dicts sorted by author/year.
     """
     try:
-        client = chromadb.PersistentClient(path=CHROMA_DIR)
+        client = _get_chroma_client()
         if project not in client.list_collections():
             return []
         collection = client.get_collection(project)
@@ -390,6 +393,57 @@ def _load_extraction(project: str) -> dict | None:
 
 def _save_extraction(project: str, fields: list, results: list) -> None:
     p = _extraction_path(project)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"fields": fields, "results": results}, indent=2), encoding="utf-8")
+
+
+def _review_criteria_path(project: str) -> Path:
+    return Path("projects") / project / "review_criteria.json"
+
+
+def _load_review_criteria(project: str) -> dict:
+    p = _review_criteria_path(project)
+    if p.exists():
+        return json.loads(p.read_text(encoding="utf-8"))
+    return {"inclusion": "", "exclusion": "", "fields": "", "question": ""}
+
+
+def _save_review_criteria(project: str, criteria: dict) -> None:
+    p = _review_criteria_path(project)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(criteria, indent=2), encoding="utf-8")
+
+
+def _review_screening_path(project: str) -> Path:
+    return Path("projects") / project / "review_screening.json"
+
+
+def _load_review_screening(project: str) -> dict:
+    p = _review_screening_path(project)
+    if p.exists():
+        return json.loads(p.read_text(encoding="utf-8"))
+    return {}
+
+
+def _save_review_screening(project: str, screening: dict) -> None:
+    p = _review_screening_path(project)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(screening, indent=2), encoding="utf-8")
+
+
+def _review_extraction_path(project: str) -> Path:
+    return Path("projects") / project / "review_extraction.json"
+
+
+def _load_review_extraction(project: str) -> dict | None:
+    p = _review_extraction_path(project)
+    if p.exists():
+        return json.loads(p.read_text(encoding="utf-8"))
+    return None
+
+
+def _save_review_extraction(project: str, fields: list, results: list) -> None:
+    p = _review_extraction_path(project)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps({"fields": fields, "results": results}, indent=2), encoding="utf-8")
 
@@ -709,8 +763,8 @@ messages = st.session_state[messages_key]
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab_chat, tab_docs, tab_extract, tab_draft, tab_write, tab_graph, tab_usage, tab_guide = st.tabs(
-    ["Chat", "Documents", "Extract", "Draft", "Write", "Graph", "Usage", "Guide"]
+tab_chat, tab_docs, tab_extract, tab_review, tab_draft, tab_write, tab_graph, tab_usage, tab_guide = st.tabs(
+    ["Chat", "Documents", "Extract", "Review", "Draft", "Write", "Graph", "Usage", "Guide"]
 )
 
 # ── Chat tab ──────────────────────────────────────────────────────────────────
@@ -1280,6 +1334,183 @@ with tab_graph:
             )
     elif graph_docs:
         st.info("Click **Tag unprocessed papers** above to generate the theme map.")
+
+# ── Review tab ────────────────────────────────────────────────────────────────
+
+with tab_review:
+    st.header(f"Systematic review — {selected_project}")
+    st.caption("Guided workflow: define criteria → screen papers → extract data → draft synthesis.")
+
+    # Load persisted state once per project
+    _rv_loaded = f"_rv_loaded_{selected_project}"
+    if _rv_loaded not in st.session_state:
+        st.session_state[f"rev_crit_{selected_project}"]   = _load_review_criteria(selected_project)
+        st.session_state[f"rev_screen_{selected_project}"] = _load_review_screening(selected_project)
+        _rv_ext = _load_review_extraction(selected_project)
+        st.session_state[f"rev_ext_{selected_project}"]    = _rv_ext["results"] if _rv_ext else []
+        st.session_state[f"rev_synth_{selected_project}"]  = ""
+        st.session_state[_rv_loaded] = True
+
+    _crit = st.session_state[f"rev_crit_{selected_project}"]
+
+    # ── Step 1: Criteria ──────────────────────────────────────────────────────
+    st.subheader("Step 1 — Define criteria")
+    _inc  = st.text_area("Inclusion criteria",  value=_crit.get("inclusion", ""),  height=100, key=f"rv_inc_{selected_project}")
+    _exc  = st.text_area("Exclusion criteria",  value=_crit.get("exclusion", ""),  height=80,  key=f"rv_exc_{selected_project}")
+    _flds = st.text_input("Fields to extract from included papers (comma-separated)", value=_crit.get("fields", ""), key=f"rv_flds_{selected_project}")
+    _q    = st.text_input("Research question (for synthesis)", value=_crit.get("question", ""), key=f"rv_q_{selected_project}")
+    if st.button("Save criteria", key=f"rv_save_crit_{selected_project}"):
+        _new_crit = {"inclusion": _inc, "exclusion": _exc, "fields": _flds, "question": _q}
+        _save_review_criteria(selected_project, _new_crit)
+        st.session_state[f"rev_crit_{selected_project}"] = _new_crit
+        st.success("Criteria saved.")
+
+    # ── Step 2: Screening ─────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("Step 2 — Screen papers")
+
+    if not _inc.strip():
+        st.info("Define and save inclusion criteria above to enable screening.")
+    else:
+        _screen = st.session_state[f"rev_screen_{selected_project}"]
+
+        # get_document_index is only called inside this button handler — never at render time
+        if st.button("Screen all papers", type="primary", key=f"rv_screen_btn_{selected_project}"):
+            if not os.getenv("ANTHROPIC_API_KEY"):
+                st.error("ANTHROPIC_API_KEY not set.")
+            else:
+                _all_docs = get_document_index(selected_project)
+                _n = len(_all_docs)
+                _prog = st.progress(0, text="Starting screening…")
+                for _si, _doc in enumerate(_all_docs):
+                    _prog.progress(_si / _n, text=f"Screening {_doc['filename']}…")
+                    try:
+                        _res = screen_paper(selected_project, _doc["filename"], _inc, _exc)
+                    except Exception as _e:
+                        _res = {"decision": "Uncertain", "reason": str(_e)}
+                    _prev_override = _screen.get(_doc["filename"], {}).get("override")
+                    # Store formatted ref alongside result so display needs no ChromaDB
+                    _ref = f"{_doc['author_str']} ({_doc['year']})" if _doc["author_str"] and _doc["year"] else _doc["filename"]
+                    _screen[_doc["filename"]] = {**_res, "override": _prev_override, "ref": _ref}
+                    if _si < _n - 1:
+                        time.sleep(7)
+                _prog.progress(1.0, text="Done.")
+                st.session_state[f"rev_screen_{selected_project}"] = _screen
+                _save_review_screening(selected_project, _screen)
+
+        if _screen:
+            _decisions = [v.get("override") or v["decision"] for v in _screen.values()]
+            _n_inc = _decisions.count("Include")
+            _n_exc = _decisions.count("Exclude")
+            _n_unc = _decisions.count("Uncertain")
+            _pc1, _pc2, _pc3, _pc4 = st.columns(4)
+            _pc1.metric("Screened",  len(_decisions))
+            _pc2.metric("Include",   _n_inc)
+            _pc3.metric("Exclude",   _n_exc)
+            _pc4.metric("Uncertain", _n_unc)
+
+            st.caption("Expand a paper to override its decision, then click Save.")
+            # Display loop uses ref stored during screening — no ChromaDB at render time
+            for _fn, _entry in _screen.items():
+                _ref = _entry.get("ref", _fn)
+                _eff_dec = _entry.get("override") or _entry["decision"]
+                _color = {"Include": "🟢", "Exclude": "🔴", "Uncertain": "🟡"}.get(_eff_dec, "⚪")
+                with st.expander(f"{_color} {_ref} — {_eff_dec}"):
+                    st.caption(f"**Reason:** {_entry['reason']}")
+                    _override_val = _entry.get("override") or "(no override)"
+                    _override = st.selectbox(
+                        "Override decision",
+                        ["(no override)", "Include", "Exclude", "Uncertain"],
+                        index=["(no override)", "Include", "Exclude", "Uncertain"].index(_override_val),
+                        key=f"rv_ovr_{selected_project}_{_fn}",
+                    )
+                    _screen[_fn]["override"] = None if _override == "(no override)" else _override
+
+            if st.button("Save screening decisions", key=f"rv_save_screen_{selected_project}"):
+                st.session_state[f"rev_screen_{selected_project}"] = _screen
+                _save_review_screening(selected_project, _screen)
+                st.success("Screening decisions saved.")
+
+    # ── Step 3: Extract & Synthesise ──────────────────────────────────────────
+    _screen = st.session_state[f"rev_screen_{selected_project}"]
+    _included_fns = [
+        fn for fn, v in _screen.items()
+        if (v.get("override") or v["decision"]) == "Include"
+    ]
+
+    if _screen and _included_fns:
+        st.divider()
+        st.subheader("Step 3 — Extract data & synthesise")
+        st.caption(f"{len(_included_fns)} paper(s) included. Uses fields from Step 1.")
+
+        _flds_list = [f.strip() for f in _flds.split(",") if f.strip()] if _flds else []
+
+        if st.button("Extract data from included papers", type="primary",
+                     disabled=not _flds_list, key=f"rv_ext_btn_{selected_project}"):
+            if not os.getenv("ANTHROPIC_API_KEY"):
+                st.error("ANTHROPIC_API_KEY not set.")
+            else:
+                _n = len(_included_fns)
+                _prog2 = st.progress(0, text="Starting extraction…")
+                _ext_results = []
+                for _ei, _fn in enumerate(_included_fns):
+                    _prog2.progress(_ei / _n, text=f"Extracting {_fn}…")
+                    try:
+                        _extr = extract_fields_from_paper(selected_project, _fn, _flds_list)
+                    except Exception as _e:
+                        _extr = {f: f"ERROR: {_e}" for f in _flds_list}
+                    _ref = _screen[_fn].get("ref", _fn)
+                    _ext_results.append({"Paper": _ref, **_extr})
+                    if _ei < _n - 1:
+                        time.sleep(7)
+                _prog2.progress(1.0, text="Done.")
+                st.session_state[f"rev_ext_{selected_project}"] = _ext_results
+                _save_review_extraction(selected_project, _flds_list, _ext_results)
+
+        _ext_results = st.session_state[f"rev_ext_{selected_project}"]
+        if _ext_results:
+            st.dataframe(_ext_results, use_container_width=True)
+            _ext_headers = list(_ext_results[0].keys())
+            _csv_rows = [",".join(f'"{h}"' for h in _ext_headers)]
+            for _row in _ext_results:
+                _csv_rows.append(",".join(f'"{str(_row.get(h, ""))}"' for h in _ext_headers))
+            st.download_button(
+                "Download extraction as CSV",
+                data="\n".join(_csv_rows),
+                file_name=f"{selected_project}_review_extraction.csv",
+                mime="text/csv",
+            )
+
+            st.markdown("---")
+            if st.button("Draft synthesis section", key=f"rv_synth_btn_{selected_project}",
+                         disabled=not _q.strip()):
+                if not os.getenv("ANTHROPIC_API_KEY"):
+                    st.error("ANTHROPIC_API_KEY not set.")
+                else:
+                    _table_str = "\n".join(
+                        " | ".join(str(v) for v in row.values()) for row in _ext_results
+                    )
+                    with st.spinner("Drafting synthesis…"):
+                        try:
+                            _synth = synthesise_review(
+                                _q, _table_str,
+                                model=claude_model,
+                                temperature=temperature,
+                                max_tokens=max_draft_tokens,
+                            )
+                            st.session_state[f"rev_synth_{selected_project}"] = _synth
+                        except Exception as _e:
+                            st.error(str(_e))
+
+        _synth = st.session_state.get(f"rev_synth_{selected_project}", "")
+        if _synth:
+            st.markdown(_synth)
+            st.download_button(
+                "Download synthesis (.md)",
+                data=_synth,
+                file_name=f"{selected_project}_synthesis.md",
+                mime="text/markdown",
+            )
 
 # ── Usage tab ─────────────────────────────────────────────────────────────────
 

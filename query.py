@@ -25,6 +25,15 @@ load_dotenv()
 
 EMBED_MODEL = "all-MiniLM-L6-v2"
 CHROMA_DIR = "chroma_db"
+
+_chroma_client: "chromadb.PersistentClient | None" = None
+
+
+def _get_chroma_client() -> "chromadb.PersistentClient":
+    global _chroma_client
+    if _chroma_client is None:
+        _chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
+    return _chroma_client
 TOP_K = 5
 TOP_K_DRAFT = 12
 CLAUDE_MODEL = "claude-sonnet-4-6"
@@ -238,6 +247,26 @@ and concise; a blog post can be conversational and longer; a press release follo
 inverted-pyramid structure with a strong opening sentence).
 7. Output clean markdown."""
 
+SCREEN_SYSTEM_PROMPT = """\
+You are a systematic review assistant evaluating whether a paper meets provided criteria.
+Return ONLY a valid JSON object with exactly two fields:
+  "decision": one of "Include", "Exclude", or "Uncertain"
+  "reason":   a single sentence explaining why
+Base your decision only on the paper text provided. \
+If the text is insufficient to judge, return "Uncertain".\
+"""
+
+REVIEW_SYNTHESIS_SYSTEM_PROMPT = """\
+You are an expert systematic review author. \
+You will be given a structured extraction table from included studies.
+Write a synthesis section suitable for a systematic review or meta-analysis:
+- Summarise main findings and patterns across studies
+- Note consistencies, contradictions, and methodological variation
+- Highlight gaps and limitations of the evidence base
+Cite every claim in Author (Year) format. \
+Flag gaps explicitly rather than speculating beyond the provided data.\
+"""
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -359,7 +388,7 @@ def query(
     Raises:
         ValueError: collection missing/empty, or API key not set.
     """
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    client = _get_chroma_client()
     existing = client.list_collections()
     if project not in existing:
         raise ValueError(
@@ -429,7 +458,7 @@ def draft(
     Raises:
         ValueError: collection missing/empty, or API key not set.
     """
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    client = _get_chroma_client()
     existing = client.list_collections()
     if project not in existing:
         raise ValueError(
@@ -476,7 +505,7 @@ def _merge_results(
     projects: list[str], q_embedding: list[float], n_results: int
 ) -> dict:
     """Query multiple collections and return the top n_results chunks by similarity."""
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    client = _get_chroma_client()
     available = client.list_collections()
     all_docs, all_metas, all_dists = [], [], []
 
@@ -654,7 +683,7 @@ def extract_themes(project: str, filename: str, model: str = CLAUDE_MODEL) -> di
     if not api_key:
         raise ValueError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
 
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    client = _get_chroma_client()
     collection = client.get_collection(name=project)
     all_result = collection.get(include=["documents", "metadatas"])
     indices = [
@@ -726,7 +755,7 @@ def annotate_paper(project: str, filename: str) -> str:
     if not api_key:
         raise ValueError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
 
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    client = _get_chroma_client()
     if project not in client.list_collections():
         raise ValueError(f"No collection found for project '{project}'.")
 
@@ -773,7 +802,7 @@ def extract_fields_from_paper(
     if not api_key:
         raise ValueError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
 
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    client = _get_chroma_client()
     collection = client.get_collection(name=project)
     all_result = collection.get(include=["documents", "metadatas"])
     indices = [
@@ -866,7 +895,7 @@ def assist_writing(
     Raises:
         ValueError: collection missing/empty or API key not set.
     """
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    client = _get_chroma_client()
     existing = client.list_collections()
     if project not in existing:
         raise ValueError(
@@ -998,6 +1027,113 @@ def assist_writing_multi(
                 raise
     _log_usage("write_assist", model, message.usage)
     return message.content[0].text, citations, scores
+
+
+def screen_paper(
+    project: str,
+    filename: str,
+    inclusion_criteria: str,
+    exclusion_criteria: str,
+    top_k: int = 8,
+) -> dict:
+    """Screen one paper against inclusion/exclusion criteria.
+
+    Returns {"decision": "Include"|"Exclude"|"Uncertain", "reason": str}.
+    Two-step fetch: metadata-only first (no HNSWLIB), then IDs-only document
+    fetch (direct SQLite lookup) — avoids loading the full collection.
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY is not set.")
+
+    chroma_client = _get_chroma_client()
+    if project not in chroma_client.list_collections():
+        return {"decision": "Uncertain", "reason": f"No collection for project '{project}'."}
+
+    collection = chroma_client.get_collection(name=project)
+
+    # Step 1: metadata only — SQLite path, no HNSWLIB index load
+    meta_result = collection.get(include=["metadatas"])
+    target_ids = [
+        meta_result["ids"][i]
+        for i, m in enumerate(meta_result["metadatas"])
+        if m.get("filename") == filename
+    ][:top_k]
+
+    if not target_ids:
+        return {"decision": "Uncertain", "reason": "No text chunks found for this paper."}
+
+    # Step 2: fetch documents for only those IDs — direct SQLite lookup
+    doc_result = collection.get(ids=target_ids, include=["documents"])
+    context = "\n\n---\n\n".join(doc_result["documents"])
+
+    prompt = (
+        f"Inclusion criteria:\n{inclusion_criteria}\n\n"
+        f"Exclusion criteria:\n{exclusion_criteria}\n\n"
+        f"Paper text:\n{context}"
+    )
+
+    client_ai = anthropic.Anthropic(api_key=api_key)
+    message = None
+    for attempt in range(2):
+        try:
+            message = client_ai.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=200,
+                temperature=0.0,
+                system=SCREEN_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            break
+        except anthropic.RateLimitError:
+            if attempt == 0:
+                time.sleep(65)
+            else:
+                raise
+    if message is None:
+        return {"decision": "Uncertain", "reason": "API call failed."}
+    _log_usage("screen", CLAUDE_MODEL, message.usage)
+    raw = message.content[0].text.strip()
+    raw = re.sub(r"^```[a-z]*\n?", "", raw)
+    raw = re.sub(r"\n?```$", "", raw).strip()
+    try:
+        result = json.loads(raw)
+        return {
+            "decision": result.get("decision", "Uncertain"),
+            "reason":   result.get("reason", ""),
+        }
+    except Exception:
+        return {"decision": "Uncertain", "reason": "Could not parse screening response."}
+
+
+def synthesise_review(
+    question: str,
+    table_text: str,
+    model: str = CLAUDE_MODEL,
+    temperature: float = 0.4,
+    max_tokens: int = 2048,
+) -> str:
+    """Draft a synthesis section from a completed extraction table (as formatted text).
+
+    Does NOT access ChromaDB — works entirely from the provided table text.
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY is not set.")
+    user_msg = (
+        f"Research question / focus:\n{question}\n\n"
+        f"Extracted data from included studies:\n\n{table_text}"
+    )
+    client_ai = anthropic.Anthropic(api_key=api_key)
+    message = client_ai.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        system=REVIEW_SYNTHESIS_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_msg}],
+    )
+    _log_usage("synthesise_review", model, message.usage)
+    return message.content[0].text
 
 
 if __name__ == "__main__":
