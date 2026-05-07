@@ -1,4 +1,4 @@
-"""
+﻿"""
 app.py — Streamlit web UI for the Lab AI RAG system.
 
 Run:
@@ -547,22 +547,17 @@ with st.sidebar:
 
     st.markdown("---")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("New chat", use_container_width=True):
-            cur_msgs = st.session_state.get(f"messages_{selected_project}", [])
-            cur_file = st.session_state.get(f"history_file_{selected_project}")
-            if len([m for m in cur_msgs if m["role"] == "user"]) >= 2 and cur_file:
-                st.session_state[f"_pending_summary_{selected_project}"] = {
-                    "messages": cur_msgs,
-                    "file": str(cur_file),
-                }
-            st.session_state[f"messages_{selected_project}"] = []
-            st.session_state.pop(f"history_file_{selected_project}", None)
-            st.rerun()
-    with col2:
-        st.button("Saved", disabled=True, use_container_width=True,
-                  help="Conversations are auto-saved after each response.")
+    if st.button("New chat", use_container_width=True):
+        cur_msgs = st.session_state.get(f"messages_{selected_project}", [])
+        cur_file = st.session_state.get(f"history_file_{selected_project}")
+        if len([m for m in cur_msgs if m["role"] == "user"]) >= 2 and cur_file:
+            st.session_state[f"_pending_summary_{selected_project}"] = {
+                "messages": cur_msgs,
+                "file": str(cur_file),
+            }
+        st.session_state[f"messages_{selected_project}"] = []
+        st.session_state.pop(f"history_file_{selected_project}", None)
+        st.rerun()
 
     # Memory display
     memories = _load_memory(selected_project)
@@ -578,23 +573,18 @@ with st.sidebar:
 
     past = list_conversations(selected_project)
     if past:
-        st.markdown("**Past conversations**")
-        for hist_path in past[:15]:
-            try:
-                hist_messages = load_conversation(hist_path)
-            except Exception:
-                continue
-            label = format_history_label(hist_path, hist_messages)
-            if st.button(label, key=str(hist_path), use_container_width=True):
-                st.session_state[f"messages_{selected_project}"] = hist_messages
-                st.session_state[f"history_file_{selected_project}"] = hist_path
-                st.rerun()
-
-    st.markdown("---")
-    st.markdown(
-        "**Sync documents**\n"
-        "```\npython ingest.py \\\n  --project {name} --zotero\n```"
-    )
+        _past_label = f"Past conversations ({len(past)})" if len(past) <= 15 else f"Past conversations (latest 15 of {len(past)})"
+        with st.expander(_past_label):
+            for hist_path in past[:15]:
+                try:
+                    hist_messages = load_conversation(hist_path)
+                except Exception:
+                    continue
+                label = format_history_label(hist_path, hist_messages)
+                if st.button(label, key=str(hist_path), use_container_width=True):
+                    st.session_state[f"messages_{selected_project}"] = hist_messages
+                    st.session_state[f"history_file_{selected_project}"] = hist_path
+                    st.rerun()
 
     st.markdown("---")
     with st.expander("Advanced settings"):
@@ -684,7 +674,8 @@ with st.sidebar:
 
     if _usage or _all_time:
         st.markdown("---")
-        with st.expander(f"Session usage ({len(_usage)} call(s))"):
+        _exp_label = f"Session usage ({len(_usage)} call(s))" if _usage else f"API usage — all time ({len(_all_time)} calls)"
+        with st.expander(_exp_label):
             if _usage:
                 _uc1, _uc2 = st.columns(2)
                 _uc1.metric("Tokens in",  f"{sum(u['input']  for u in _usage):,}")
@@ -718,8 +709,8 @@ messages = st.session_state[messages_key]
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab_chat, tab_docs, tab_extract, tab_draft, tab_write, tab_graph, tab_guide = st.tabs(
-    ["Chat", "Documents", "Extract", "Draft", "Write", "Graph", "Guide"]
+tab_chat, tab_docs, tab_extract, tab_draft, tab_write, tab_graph, tab_usage, tab_guide = st.tabs(
+    ["Chat", "Documents", "Extract", "Draft", "Write", "Graph", "Usage", "Guide"]
 )
 
 # ── Chat tab ──────────────────────────────────────────────────────────────────
@@ -1289,6 +1280,77 @@ with tab_graph:
             )
     elif graph_docs:
         st.info("Click **Tag unprocessed papers** above to generate the theme map.")
+
+# ── Usage tab ─────────────────────────────────────────────────────────────────
+
+with tab_usage:
+    st.header("API Usage")
+    st.caption(
+        "Tracks Anthropic API credit consumption — separate from any Claude.ai subscription. "
+        "Data is stored in `usage_log.jsonl` and can be downloaded for external analysis."
+    )
+
+    if not Path(USAGE_LOG).exists():
+        st.info("No usage data yet. Make an API call to start tracking.")
+    else:
+        import pandas as pd
+        df = pd.read_json(USAGE_LOG, lines=True)
+        if df.empty:
+            st.info("No usage data yet.")
+        else:
+            df["ts"] = pd.to_datetime(df["ts"])
+            df["date"] = df["ts"].dt.date
+            _TAB_PRICES = {
+                "claude-haiku-4-5-20251001": (0.80, 4.00),
+                "claude-sonnet-4-6":         (3.00, 15.00),
+                "claude-opus-4-7":           (15.00, 75.00),
+            }
+            df["cost"] = df.apply(
+                lambda r: r["input"]  / 1e6 * _TAB_PRICES.get(r["model"], (3.00, 15.00))[0]
+                        + r["output"] / 1e6 * _TAB_PRICES.get(r["model"], (3.00, 15.00))[1],
+                axis=1,
+            )
+
+            _mc1, _mc2, _mc3, _mc4 = st.columns(4)
+            _mc1.metric("Total calls",  len(df))
+            _mc2.metric("Tokens in",    f"{df['input'].sum():,}")
+            _mc3.metric("Tokens out",   f"{df['output'].sum():,}")
+            _mc4.metric("Est. cost",    f"${df['cost'].sum():.4f}")
+
+            st.markdown("---")
+            st.subheader("Cumulative cost over time")
+            _daily = df.groupby("date")["cost"].sum().cumsum().reset_index()
+            _daily.columns = ["date", "cumulative cost ($)"]
+            st.line_chart(_daily.set_index("date"))
+
+            _bc1, _bc2 = st.columns(2)
+            with _bc1:
+                st.subheader("By model")
+                _by_model = df.groupby("model")["cost"].sum().sort_values(ascending=False)
+                _by_model.index = (
+                    _by_model.index
+                    .str.replace("claude-", "", regex=False)
+                    .str.replace("-20251001", "", regex=False)
+                )
+                st.bar_chart(_by_model)
+            with _bc2:
+                st.subheader("By call type")
+                _by_fn = df.groupby("fn")["cost"].sum().sort_values(ascending=False)
+                st.bar_chart(_by_fn)
+
+            st.markdown("---")
+            with st.expander("Raw log data"):
+                st.dataframe(
+                    df[["ts", "fn", "model", "input", "output", "cost"]]
+                    .sort_values("ts", ascending=False),
+                    use_container_width=True,
+                )
+                st.download_button(
+                    "Download log as CSV",
+                    data=df.to_csv(index=False),
+                    file_name="usage_log.csv",
+                    mime="text/csv",
+                )
 
 # ── Guide tab ─────────────────────────────────────────────────────────────────
 

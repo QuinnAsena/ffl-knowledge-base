@@ -241,13 +241,40 @@ Open the **Advanced settings** expander in the sidebar to fine-tune every call.
 
 ### Session usage tracker
 
-After you make your first API call, a **Session usage** expander appears at the bottom of the sidebar showing:
+The usage tracker measures **Anthropic API credit consumption** — the pay-per-use charges billed to the lab's API account. This is entirely separate from any Claude.ai or Pro subscription; the app uses the API directly and is billed by the token regardless of what subscription plan exists.
 
-- **Tokens in / Tokens out** — cumulative token counts for all calls since the app started
-- **Est. cost** — estimated USD cost based on published Anthropic pricing (Haiku $0.80/$4.00 · Sonnet $3.00/$15.00 · Opus $15.00/$75.00 per million tokens input/output)
-- **Reset counter** — clears the running totals for the current session
+After your first API call, an expander appears at the bottom of the sidebar. It shows two sections:
 
-The counter accumulates across all tabs and all call types (Chat, Draft, Extract, Graph tagging, Write). It resets automatically when the app server restarts. Use it to get a feel for the cost of different workflows — for example, a single Chat query typically costs a fraction of a cent, while running Extract across 30 papers at Opus pricing can add up to a few dollars.
+**This session** (resets when the app server restarts):
+- **Tokens in / Tokens out** — cumulative counts for all calls in the current session
+- **Est. cost** — estimated USD cost at published Anthropic pricing
+- **Reset session counter** — clears the in-memory session tally only; does not affect the log file
+
+**All time** (persistent across restarts):
+- Cumulative totals and cost since the log file was created
+- Total call count
+
+Pricing shown: Haiku $0.80/$4.00 · Sonnet $3.00/$15.00 · Opus $15.00/$75.00 per million input/output tokens. Verify current rates at [console.anthropic.com](https://console.anthropic.com).
+
+#### The log file
+
+Every API call is appended to `usage_log.jsonl` in the project root. Each line is a JSON record:
+
+```json
+{"ts": "2026-05-07T14:23:01", "fn": "query", "model": "claude-sonnet-4-6", "input": 3241, "output": 287}
+```
+
+Fields: `ts` (ISO timestamp), `fn` (call type: `query`, `draft`, `extract_themes`, `annotate`, `extract_fields`, `refine`, `write_assist`, `summarise`), `model`, `input` and `output` token counts.
+
+This file is never overwritten — only appended to. You can download it and analyse it in any tool that reads JSON Lines (Python, R, Excel via Power Query). For example, to chart cumulative cost over time in Python:
+
+```python
+import json, pandas as pd
+df = pd.read_json("usage_log.jsonl", lines=True)
+df["cost"] = df["input"] / 1e6 * 3.0 + df["output"] / 1e6 * 15.0  # Sonnet rates
+df["ts"] = pd.to_datetime(df["ts"])
+df.set_index("ts")["cost"].cumsum().plot(title="Cumulative API cost")
+```
 
 #### Setting details
 

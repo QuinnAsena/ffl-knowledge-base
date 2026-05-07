@@ -238,6 +238,7 @@ and concise; a blog post can be conversational and longer; a press release follo
 inverted-pyramid structure with a strong opening sentence).
 7. Output clean markdown."""
 
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
