@@ -253,7 +253,14 @@ ZOTERO_LIBRARY_TYPE=user    # or "group"
 
 ## Future features
 
+### Recently completed (2026-05-06 – 2026-05-07)
+- **Midnight blue theme** — `.streamlit/config.toml` `[theme]` block; sky blue primary, deep navy background.
+- **API usage tracking** — `_log_usage()` after all 11 `client.messages.create()` calls; module-level `_session_usage` accumulator; `usage_log.jsonl` append-only log (timestamp, fn, model, input/output tokens); sidebar expander shows session + all-time totals with estimated cost.
+- **Sidebar cleanup** — removed redundant "Saved" button; removed "Sync documents" code block; moved past conversations into collapsible expander; fixed label to show true count (not capped count).
+- **Section-aware retrieval (branch: `feature/section-filter`)** — section detection regex in `ingest.py`; `_filter_by_section()` post-filter (no ChromaDB WHERE clauses) in `query.py`; all 6 retrieval functions updated; `app.py` multiselect + fallback warnings. **Blocked**: Windows HNSWLIB segfault prevents testing. Implementation is complete — re-test on lab server (Linux) or after chromadb upgrade.
+
 ### Pending
+- **Usage analytics tab** — a new tab reading `usage_log.jsonl` to visualise API spend over time. Charts: cumulative cost line (by date), breakdown bar charts by model (Haiku/Sonnet/Opus) and by call type (query, draft, extract, annotate, write). Would also benefit from logging temperature and K per call (requires adding those fields to `_log_usage`). Needs `pandas` added to `requirements.txt` (already available transitively via Streamlit/sentence-transformers but should be pinned). Doable in ~80 lines; low risk, no new API dependencies.
 - **Figure caption writer** — describe a figure, get a publication-quality caption in the style of the current manuscript section.
 - **Email and letter drafts** — outreach mode extended to professional correspondence: grant inquiry letters, collaboration proposals, cover letters.
 - **Literature review outline** — given a research question, generate a thematic outline with suggested section headings and papers mapped to each.

@@ -1,4 +1,4 @@
-"""
+﻿"""
 app.py — Streamlit web UI for the Lab AI RAG system.
 
 Run:
@@ -22,6 +22,7 @@ load_dotenv()
 from query import (
     CHROMA_DIR,
     DRAFT_SYSTEM_PROMPT,
+    USAGE_LOG,
     GAP_MAP_SYSTEM_PROMPT,
     OUTREACH_SYSTEM_PROMPT,
     PAPER_SYSTEM_PROMPT,
@@ -29,10 +30,12 @@ from query import (
     annotate_paper,
     assist_writing,
     assist_writing_multi,
+    clear_session_usage,
     draft,
     draft_multi,
     extract_fields_from_paper,
     extract_themes,
+    get_session_usage,
     query,
     query_multi,
     refine_draft,
@@ -648,6 +651,52 @@ with st.sidebar:
             ),
         )
 
+    _usage = get_session_usage()
+    _PRICES = {
+        "claude-haiku-4-5-20251001": (0.80, 4.00),
+        "claude-sonnet-4-6":         (3.00, 15.00),
+        "claude-opus-4-7":           (15.00, 75.00),
+    }
+
+    def _calc_cost(entries):
+        return sum(
+            u["input"]  / 1_000_000 * _PRICES.get(u["model"], (3.00, 15.00))[0]
+            + u["output"] / 1_000_000 * _PRICES.get(u["model"], (3.00, 15.00))[1]
+            for u in entries
+        )
+
+    _all_time = []
+    try:
+        with open(USAGE_LOG, encoding="utf-8") as _f:
+            _all_time = [json.loads(line) for line in _f if line.strip()]
+    except FileNotFoundError:
+        pass
+
+    if _usage or _all_time:
+        st.markdown("---")
+        _exp_label = f"Session usage ({len(_usage)} call(s))" if _usage else f"API usage — all time ({len(_all_time)} calls)"
+        with st.expander(_exp_label):
+            if _usage:
+                _uc1, _uc2 = st.columns(2)
+                _uc1.metric("Tokens in",  f"{sum(u['input']  for u in _usage):,}")
+                _uc2.metric("Tokens out", f"{sum(u['output'] for u in _usage):,}")
+                st.metric("Est. cost", f"${_calc_cost(_usage):.4f}")
+            else:
+                st.caption("No calls yet this session.")
+
+            if _all_time:
+                st.markdown("**All time**")
+                _ac1, _ac2 = st.columns(2)
+                _ac1.metric("Tokens in",  f"{sum(u['input']  for u in _all_time):,}")
+                _ac2.metric("Tokens out", f"{sum(u['output'] for u in _all_time):,}")
+                st.metric("Est. cost", f"${_calc_cost(_all_time):.4f}")
+                st.caption(f"{len(_all_time)} total calls since log started.")
+
+            st.caption("Haiku $0.80/$4 · Sonnet $3/$15 · Opus $15/$75 per M tokens. Verify at console.anthropic.com.")
+            if st.button("Reset session counter", key="reset_usage"):
+                clear_session_usage()
+                st.rerun()
+
 # ── Session state ─────────────────────────────────────────────────────────────
 
 messages_key = f"messages_{selected_project}"
@@ -660,8 +709,8 @@ messages = st.session_state[messages_key]
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab_chat, tab_docs, tab_extract, tab_draft, tab_write, tab_graph, tab_guide = st.tabs(
-    ["Chat", "Documents", "Extract", "Draft", "Write", "Graph", "Guide"]
+tab_chat, tab_docs, tab_extract, tab_draft, tab_write, tab_graph, tab_usage, tab_guide = st.tabs(
+    ["Chat", "Documents", "Extract", "Draft", "Write", "Graph", "Usage", "Guide"]
 )
 
 # ── Chat tab ──────────────────────────────────────────────────────────────────
@@ -1231,6 +1280,77 @@ with tab_graph:
             )
     elif graph_docs:
         st.info("Click **Tag unprocessed papers** above to generate the theme map.")
+
+# ── Usage tab ─────────────────────────────────────────────────────────────────
+
+with tab_usage:
+    st.header("API Usage")
+    st.caption(
+        "Tracks Anthropic API credit consumption — separate from any Claude.ai subscription. "
+        "Data is stored in `usage_log.jsonl` and can be downloaded for external analysis."
+    )
+
+    if not Path(USAGE_LOG).exists():
+        st.info("No usage data yet. Make an API call to start tracking.")
+    else:
+        import pandas as pd
+        df = pd.read_json(USAGE_LOG, lines=True)
+        if df.empty:
+            st.info("No usage data yet.")
+        else:
+            df["ts"] = pd.to_datetime(df["ts"])
+            df["date"] = df["ts"].dt.date
+            _TAB_PRICES = {
+                "claude-haiku-4-5-20251001": (0.80, 4.00),
+                "claude-sonnet-4-6":         (3.00, 15.00),
+                "claude-opus-4-7":           (15.00, 75.00),
+            }
+            df["cost"] = df.apply(
+                lambda r: r["input"]  / 1e6 * _TAB_PRICES.get(r["model"], (3.00, 15.00))[0]
+                        + r["output"] / 1e6 * _TAB_PRICES.get(r["model"], (3.00, 15.00))[1],
+                axis=1,
+            )
+
+            _mc1, _mc2, _mc3, _mc4 = st.columns(4)
+            _mc1.metric("Total calls",  len(df))
+            _mc2.metric("Tokens in",    f"{df['input'].sum():,}")
+            _mc3.metric("Tokens out",   f"{df['output'].sum():,}")
+            _mc4.metric("Est. cost",    f"${df['cost'].sum():.4f}")
+
+            st.markdown("---")
+            st.subheader("Cumulative cost over time")
+            _daily = df.groupby("date")["cost"].sum().cumsum().reset_index()
+            _daily.columns = ["date", "cumulative cost ($)"]
+            st.line_chart(_daily.set_index("date"))
+
+            _bc1, _bc2 = st.columns(2)
+            with _bc1:
+                st.subheader("By model")
+                _by_model = df.groupby("model")["cost"].sum().sort_values(ascending=False)
+                _by_model.index = (
+                    _by_model.index
+                    .str.replace("claude-", "", regex=False)
+                    .str.replace("-20251001", "", regex=False)
+                )
+                st.bar_chart(_by_model)
+            with _bc2:
+                st.subheader("By call type")
+                _by_fn = df.groupby("fn")["cost"].sum().sort_values(ascending=False)
+                st.bar_chart(_by_fn)
+
+            st.markdown("---")
+            with st.expander("Raw log data"):
+                st.dataframe(
+                    df[["ts", "fn", "model", "input", "output", "cost"]]
+                    .sort_values("ts", ascending=False),
+                    use_container_width=True,
+                )
+                st.download_button(
+                    "Download log as CSV",
+                    data=df.to_csv(index=False),
+                    file_name="usage_log.csv",
+                    mime="text/csv",
+                )
 
 # ── Guide tab ─────────────────────────────────────────────────────────────────
 

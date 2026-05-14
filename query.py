@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime
 from functools import lru_cache
 
 import anthropic
@@ -27,6 +28,37 @@ CHROMA_DIR = "chroma_db"
 TOP_K = 5
 TOP_K_DRAFT = 12
 CLAUDE_MODEL = "claude-sonnet-4-6"
+
+# ── Usage tracking ─────────────────────────────────────────────────────────────
+
+USAGE_LOG = "usage_log.jsonl"
+
+_session_usage: list[dict] = []
+
+
+def _log_usage(fn: str, model: str, usage) -> None:
+    entry = {
+        "ts": datetime.now().isoformat(),
+        "fn": fn,
+        "model": model,
+        "input": usage.input_tokens,
+        "output": usage.output_tokens,
+    }
+    _session_usage.append(entry)
+    try:
+        with open(USAGE_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
+
+def get_session_usage() -> list[dict]:
+    return list(_session_usage)
+
+
+def clear_session_usage() -> None:
+    _session_usage.clear()
+
 
 SYSTEM_PROMPT = """You are a research assistant for an academic lab. Your job is to answer \
 questions using only the document excerpts provided to you.
@@ -206,6 +238,7 @@ and concise; a blog post can be conversational and longer; a press release follo
 inverted-pyramid structure with a strong opening sentence).
 7. Output clean markdown."""
 
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
@@ -304,6 +337,7 @@ def summarise_conversation(messages: list) -> str:
         system=MEMORY_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": convo_text}],
     )
+    _log_usage("summarise", CLAUDE_MODEL, message.usage)
     return message.content[0].text.strip()
 
 
@@ -370,7 +404,7 @@ def query(
         system=system,
         messages=[{"role": "user", "content": build_user_message(question, context)}],
     )
-
+    _log_usage("query", model, message.usage)
     return message.content[0].text, citations, scores
 
 
@@ -434,7 +468,7 @@ def draft(
         system=system_prompt,
         messages=[{"role": "user", "content": build_user_message(prompt, context)}],
     )
-
+    _log_usage("draft", model, message.usage)
     return message.content[0].text, citations
 
 
@@ -520,6 +554,7 @@ def query_multi(
         system=system,
         messages=[{"role": "user", "content": build_user_message(question, context)}],
     )
+    _log_usage("query", model, message.usage)
     return message.content[0].text, citations, scores
 
 
@@ -565,6 +600,7 @@ def draft_multi(
         system=system_prompt,
         messages=[{"role": "user", "content": build_user_message(prompt, context)}],
     )
+    _log_usage("draft", model, message.usage)
     return message.content[0].text, citations
 
 
@@ -595,6 +631,7 @@ def refine_draft(current_draft: str, instruction: str) -> str:
         system=REFINE_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_msg}],
     )
+    _log_usage("refine", CLAUDE_MODEL, message.usage)
     return message.content[0].text
 
 
@@ -650,6 +687,7 @@ def extract_themes(project: str, filename: str, model: str = CLAUDE_MODEL) -> di
 
     if message is None:
         return {}
+    _log_usage("extract_themes", model, message.usage)
     raw = message.content[0].text.strip()
     raw = re.sub(r"^```[a-z]*\n?", "", raw)
     raw = re.sub(r"\n?```$", "", raw).strip()
@@ -713,6 +751,7 @@ def annotate_paper(project: str, filename: str) -> str:
         system=ANNOTATION_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": context}],
     )
+    _log_usage("annotate", CLAUDE_MODEL, message.usage)
     return message.content[0].text
 
 
@@ -774,6 +813,7 @@ def extract_fields_from_paper(
 
     if message is None:
         return {f: "—" for f in fields}
+    _log_usage("extract_fields", CLAUDE_MODEL, message.usage)
     raw = message.content[0].text.strip()
 
     # Strip markdown code fences Claude sometimes adds despite instructions
@@ -886,6 +926,7 @@ def assist_writing(
                 time.sleep(65)
             else:
                 raise
+    _log_usage("write_assist", model, message.usage)
     return message.content[0].text, citations, scores
 
 
@@ -955,6 +996,7 @@ def assist_writing_multi(
                 time.sleep(65)
             else:
                 raise
+    _log_usage("write_assist", model, message.usage)
     return message.content[0].text, citations, scores
 
 
