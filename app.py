@@ -544,22 +544,17 @@ with st.sidebar:
 
     st.markdown("---")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("New chat", use_container_width=True):
-            cur_msgs = st.session_state.get(f"messages_{selected_project}", [])
-            cur_file = st.session_state.get(f"history_file_{selected_project}")
-            if len([m for m in cur_msgs if m["role"] == "user"]) >= 2 and cur_file:
-                st.session_state[f"_pending_summary_{selected_project}"] = {
-                    "messages": cur_msgs,
-                    "file": str(cur_file),
-                }
-            st.session_state[f"messages_{selected_project}"] = []
-            st.session_state.pop(f"history_file_{selected_project}", None)
-            st.rerun()
-    with col2:
-        st.button("Saved", disabled=True, use_container_width=True,
-                  help="Conversations are auto-saved after each response.")
+    if st.button("New chat", use_container_width=True):
+        cur_msgs = st.session_state.get(f"messages_{selected_project}", [])
+        cur_file = st.session_state.get(f"history_file_{selected_project}")
+        if len([m for m in cur_msgs if m["role"] == "user"]) >= 2 and cur_file:
+            st.session_state[f"_pending_summary_{selected_project}"] = {
+                "messages": cur_msgs,
+                "file": str(cur_file),
+            }
+        st.session_state[f"messages_{selected_project}"] = []
+        st.session_state.pop(f"history_file_{selected_project}", None)
+        st.rerun()
 
     # Memory display
     memories = _load_memory(selected_project)
@@ -575,23 +570,18 @@ with st.sidebar:
 
     past = list_conversations(selected_project)
     if past:
-        st.markdown("**Past conversations**")
-        for hist_path in past[:15]:
-            try:
-                hist_messages = load_conversation(hist_path)
-            except Exception:
-                continue
-            label = format_history_label(hist_path, hist_messages)
-            if st.button(label, key=str(hist_path), use_container_width=True):
-                st.session_state[f"messages_{selected_project}"] = hist_messages
-                st.session_state[f"history_file_{selected_project}"] = hist_path
-                st.rerun()
-
-    st.markdown("---")
-    st.markdown(
-        "**Sync documents**\n"
-        "```\npython ingest.py \\\n  --project {name} --zotero\n```"
-    )
+        _past_label = f"Past conversations ({len(past)})" if len(past) <= 15 else f"Past conversations (latest 15 of {len(past)})"
+        with st.expander(_past_label):
+            for hist_path in past[:15]:
+                try:
+                    hist_messages = load_conversation(hist_path)
+                except Exception:
+                    continue
+                label = format_history_label(hist_path, hist_messages)
+                if st.button(label, key=str(hist_path), use_container_width=True):
+                    st.session_state[f"messages_{selected_project}"] = hist_messages
+                    st.session_state[f"history_file_{selected_project}"] = hist_path
+                    st.rerun()
 
     st.markdown("---")
     with st.expander("Advanced settings"):
@@ -651,7 +641,7 @@ with st.sidebar:
 
         show_scores = st.toggle(
             "Show retrieval scores",
-            value=False,
+            value=True,
             help=(
                 "Display cosine similarity scores (0–1) next to source chunks. "
                 "Scores above ~0.6 indicate strong relevance; below ~0.4 the match may be weak."

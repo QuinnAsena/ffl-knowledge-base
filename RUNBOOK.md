@@ -58,7 +58,7 @@ After installing, always restart Streamlit.
 
 ```bash
 source .venv/Scripts/activate
-python query.py --project fire "What are the main drivers of fire spread?"
+python query.py --project Arctic-NSF "What are the main drivers of fire spread?"
 ```
 
 ---
@@ -70,8 +70,9 @@ python query.py --project fire "What are the main drivers of fire spread?"
 | Web UI | `http://localhost:8501` |
 | API key | `.env` → `ANTHROPIC_API_KEY` |
 | Zotero keys | `.env` → `ZOTERO_API_KEY`, `ZOTERO_USER_ID` |
-| PDFs (fire) | `projects/fire/pdfs/` |
-| PDFs (alaska) | `projects/alaska/pdfs/` |
+| PDFs (Arctic-NSF) | `projects/Arctic-NSF/pdfs/` |
+| PDFs (JFSP) | `projects/JFSP/pdfs/` |
+| PDFs (Uncurated) | `projects/Uncurated/pdfs/` |
 | Chat history | `projects/*/history/*.json` |
 | Annotations | `projects/*/annotations.json` |
 | Last extraction | `projects/*/last_extraction.json` |
@@ -100,9 +101,9 @@ Then restart Streamlit.
 Annotations, extractions, and theme data are cached in JSON files under `projects/`.
 Delete the relevant file to force a re-run:
 ```bash
-rm projects/fire/annotations.json
-rm projects/fire/last_extraction.json
-rm projects/fire/themes.json
+rm projects/Arctic-NSF/annotations.json
+rm projects/Arctic-NSF/last_extraction.json
+rm projects/Arctic-NSF/themes.json
 ```
 
 **chromadb / embedding errors on first run after new ingest**
