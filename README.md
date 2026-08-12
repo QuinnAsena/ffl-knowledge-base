@@ -135,7 +135,7 @@ streamlit run app.py
 
 Open [http://localhost:8501](http://localhost:8501).
 
-The UI has seven tabs:
+The UI has eight tabs:
 
 | Tab | Purpose |
 |---|---|
@@ -143,11 +143,12 @@ The UI has seven tabs:
 | **Documents** | Browse the full index; generate annotated bibliography entries |
 | **Extract** | Pull structured fields from every paper into a CSV table |
 | **Draft** | Generate grant sections, IMRaD sections, gap maps, outreach copy |
-| **Write** | Assisted markdown editor — AI helps refine, challenge, or expand your draft |
+| **Write** | Assisted markdown editor — Claude refines, challenges, or expands your draft |
 | **Graph** | Interactive theme network — papers connected by shared subject tags |
+| **Usage** | API token and cost charts built from `usage_log.jsonl` |
 | **Guide** | Full user guide rendered inline |
 
-The sidebar lets you switch projects, access past conversations, adjust model (Haiku / Sonnet / Opus), temperature, retrieval depth, and other advanced settings.
+The sidebar lets you switch projects, access past conversations, adjust model (Haiku 4.5 / Sonnet 5 / Opus 5), reasoning depth, temperature, retrieval depth, and other advanced settings.
 
 ---
 

@@ -16,6 +16,7 @@ from functools import lru_cache
 
 import anthropic
 import chromadb
+from chromadb.config import Settings
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 
@@ -27,7 +28,56 @@ EMBED_MODEL = "all-MiniLM-L6-v2"
 CHROMA_DIR = "chroma_db"
 TOP_K = 5
 TOP_K_DRAFT = 12
-CLAUDE_MODEL = "claude-sonnet-4-6"
+CLAUDE_MODEL = "claude-sonnet-5"
+
+# Seconds to wait before retrying a rate-limited (429) request.
+RATE_LIMIT_SLEEP = 65
+
+# Model families that removed the sampling parameters: sending `temperature` to one
+# of these returns HTTP 400 (`temperature is deprecated for this model`). Matched as
+# a prefix against the model id, so dated variants are covered too.
+NO_TEMPERATURE_MODELS = (
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-fable-5",
+    "claude-mythos-5",
+)
+
+# Models that reason before answering unless told not to. Their thinking tokens are
+# drawn from the same `max_tokens` budget as the answer, so a small budget can be
+# spent entirely on reasoning and return no text at all — hence THINKING_HEADROOM
+# below and the allow_thinking switch in _create_message().
+THINKING_MODELS = (
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-fable-5",
+    "claude-mythos-5",
+)
+
+# Extra output budget granted when a model reasons, on top of the answer length the
+# caller asked for. Reasoning is billed as output tokens but only when actually used.
+THINKING_HEADROOM = 4096
+
+# Reasoning depth for models that support it. "low" is strong and inexpensive on the
+# Claude 5 family; raise it for drafting work. Haiku rejects the parameter.
+DEFAULT_EFFORT = "medium"
+
+
+def supports_temperature(model: str) -> bool:
+    """True if `model` accepts a `temperature` argument."""
+    return not model.startswith(NO_TEMPERATURE_MODELS)
+
+
+def thinks_by_default(model: str) -> bool:
+    """True if `model` reasons before answering unless thinking is disabled."""
+    return model.startswith(THINKING_MODELS)
+
+
+def supports_effort(model: str) -> bool:
+    """True if `model` accepts an `output_config.effort` reasoning-depth setting."""
+    return not model.startswith("claude-haiku")
 
 # ── Usage tracking ─────────────────────────────────────────────────────────────
 
@@ -60,6 +110,90 @@ def clear_session_usage() -> None:
     _session_usage.clear()
 
 
+# ── API call wrapper ──────────────────────────────────────────────────────────
+
+
+def _create_message(
+    client_ai,
+    fn: str,
+    model: str,
+    max_tokens: int,
+    temperature: float | None = None,
+    effort: str | None = None,
+    allow_thinking: bool = True,
+    retry_on_rate_limit: bool = False,
+    **kwargs,
+):
+    """Send one Messages API request, log its token usage, and return the response.
+
+    Normalises the request for whichever model was selected:
+      * drops `temperature` for models that reject sampling parameters, so a model
+        choice can never turn a query into a 400 (see supports_temperature);
+      * sets the reasoning depth via output_config.effort where supported;
+      * with allow_thinking=False, turns reasoning off on models that would
+        otherwise reason — used for short structured replies (JSON, tags) where
+        reasoning would consume the whole token budget;
+      * with reasoning left on, adds THINKING_HEADROOM to max_tokens, because
+        reasoning and the answer share that budget.
+
+    With retry_on_rate_limit, retries once after RATE_LIMIT_SLEEP seconds on a 429.
+
+    Raises:
+        anthropic.RateLimitError: rate limit persisted after the retry.
+    """
+    if temperature is not None and supports_temperature(model):
+        kwargs["temperature"] = temperature
+
+    extra_body = {}
+    if effort and supports_effort(model):
+        extra_body["output_config"] = {"effort": effort}
+
+    thinking = thinks_by_default(model)
+    if thinking and not allow_thinking:
+        kwargs["thinking"] = {"type": "disabled"}
+        thinking = False
+    if thinking:
+        max_tokens += THINKING_HEADROOM
+
+    if extra_body:
+        kwargs["extra_body"] = extra_body
+
+    attempts = 2 if retry_on_rate_limit else 1
+    for attempt in range(attempts):
+        try:
+            message = client_ai.messages.create(
+                model=model, max_tokens=max_tokens, **kwargs
+            )
+            break
+        except anthropic.RateLimitError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(RATE_LIMIT_SLEEP)
+
+    _log_usage(fn, model, message.usage)
+    return message
+
+
+def _extract_text(message, note_truncation: bool = False) -> str:
+    """Return the text of a response, ignoring any reasoning blocks.
+
+    Reasoning models put a `thinking` block ahead of the answer, and that block has
+    no `.text` attribute — reading content[0].text raises AttributeError on them.
+
+    note_truncation appends a visible warning when the reply was cut off by the
+    token limit; leave it off for replies that are parsed as JSON.
+    """
+    parts = [b.text for b in message.content if getattr(b, "type", None) == "text"]
+    text = "\n".join(p for p in parts if p).strip()
+
+    if note_truncation and message.stop_reason == "max_tokens":
+        text += (
+            "\n\n**[Cut off at the length limit — raise “Max draft length” in "
+            "Advanced settings and generate again.]**"
+        )
+    return text
+
+
 SYSTEM_PROMPT = """You are a research assistant for an academic lab. Your job is to answer \
 questions using only the document excerpts provided to you.
 
@@ -69,7 +203,9 @@ Rules:
 (e.g., [Smith et al. (2023), p. 4] or [Smith et al. (2023) [online]]). \
 Place the citation immediately after the relevant sentence.
 3. If multiple excerpts support the same point, cite all of them.
-4. If the answer is not contained in the provided excerpts, say exactly:
+4. If the excerpts only partially address the question, give the partial answer: report what \
+they do support, cite it, and state plainly what is missing. Reserve the following sentence for \
+when the excerpts contain nothing relevant at all, and then say exactly:
    "I don't have enough information in the provided documents to answer this question."
 5. Be concise but complete. Prefer bullet points for multi-part answers.
 6. Do not speculate or extrapolate beyond what the documents state."""
@@ -310,6 +446,31 @@ def _get_embed_model() -> SentenceTransformer:
     return SentenceTransformer(EMBED_MODEL)
 
 
+# ── ChromaDB client (one per process — see warning below) ─────────────────────
+
+
+@lru_cache(maxsize=1)
+def get_chroma_client():
+    """Return the process-wide ChromaDB client, creating it on first use.
+
+    Build exactly ONE client per process and share it. ChromaDB's local segment
+    manager and the underlying hnswlib index are not thread-safe, and Streamlit
+    runs every script rerun on a fresh thread. This module used to construct a
+    new client on every call (8 sites, ~10 clients per script run), which is a
+    real thread-safety hazard on Windows, where the failure mode is a
+    segmentation fault with no Python traceback — just a dead process.
+
+    anonymized_telemetry=False is set for hygiene, but note it does NOT silence
+    the "Failed to send telemetry event ... capture() takes 1 positional
+    argument but 3 were given" console spam: that is chromadb 0.6.3 calling an
+    old posthog API against the installed posthog 7.x. Pin posthog<6 to stop it.
+    """
+    return chromadb.PersistentClient(
+        path=CHROMA_DIR,
+        settings=Settings(anonymized_telemetry=False),
+    )
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
@@ -330,15 +491,17 @@ def summarise_conversation(messages: list) -> str:
     )
 
     client_ai = anthropic.Anthropic(api_key=api_key)
-    message = client_ai.messages.create(
+    message = _create_message(
+        client_ai,
+        fn="summarise",
         model=CLAUDE_MODEL,
         max_tokens=200,
         temperature=0.3,
         system=MEMORY_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": convo_text}],
+        allow_thinking=False,
     )
-    _log_usage("summarise", CLAUDE_MODEL, message.usage)
-    return message.content[0].text.strip()
+    return _extract_text(message)
 
 
 def query(
@@ -348,6 +511,7 @@ def query(
     model: str = CLAUDE_MODEL,
     temperature: float = 0.3,
     max_tokens: int = 1024,
+    effort: str = DEFAULT_EFFORT,
 ) -> tuple[str, list[str], list[float]]:
     """
     Run a RAG query against a project collection.
@@ -359,7 +523,7 @@ def query(
     Raises:
         ValueError: collection missing/empty, or API key not set.
     """
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    client = get_chroma_client()
     existing = client.list_collections()
     if project not in existing:
         raise ValueError(
@@ -397,15 +561,17 @@ def query(
     )
 
     client_ai = anthropic.Anthropic(api_key=api_key)
-    message = client_ai.messages.create(
+    message = _create_message(
+        client_ai,
+        fn="query",
         model=model,
         max_tokens=max_tokens,
         temperature=temperature,
+        effort=effort,
         system=system,
         messages=[{"role": "user", "content": build_user_message(question, context)}],
     )
-    _log_usage("query", model, message.usage)
-    return message.content[0].text, citations, scores
+    return _extract_text(message, note_truncation=True), citations, scores
 
 
 def draft(
@@ -416,6 +582,7 @@ def draft(
     model: str = CLAUDE_MODEL,
     temperature: float = 0.4,
     max_tokens: int = 2048,
+    effort: str = DEFAULT_EFFORT,
 ) -> tuple[str, list[str]]:
     """
     Generate a written section grounded in the project literature.
@@ -429,7 +596,7 @@ def draft(
     Raises:
         ValueError: collection missing/empty, or API key not set.
     """
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    client = get_chroma_client()
     existing = client.list_collections()
     if project not in existing:
         raise ValueError(
@@ -461,22 +628,24 @@ def draft(
         raise ValueError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
 
     client_ai = anthropic.Anthropic(api_key=api_key)
-    message = client_ai.messages.create(
+    message = _create_message(
+        client_ai,
+        fn="draft",
         model=model,
         max_tokens=max_tokens,
         temperature=temperature,
+        effort=effort,
         system=system_prompt,
         messages=[{"role": "user", "content": build_user_message(prompt, context)}],
     )
-    _log_usage("draft", model, message.usage)
-    return message.content[0].text, citations
+    return _extract_text(message, note_truncation=True), citations
 
 
 def _merge_results(
     projects: list[str], q_embedding: list[float], n_results: int
 ) -> dict:
     """Query multiple collections and return the top n_results chunks by similarity."""
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    client = get_chroma_client()
     available = client.list_collections()
     all_docs, all_metas, all_dists = [], [], []
 
@@ -499,7 +668,10 @@ def _merge_results(
     if not all_docs:
         return {"documents": [[]], "metadatas": [[]], "distances": [[]]}
 
-    combined = sorted(zip(all_dists, all_docs, all_metas))[:n_results]
+    # Sort on distance only: tuple comparison would fall through to the metadata
+    # dicts whenever two chunks tie on distance and text (e.g. the same paper
+    # ingested into two projects), and dicts are not orderable.
+    combined = sorted(zip(all_dists, all_docs, all_metas), key=lambda r: r[0])[:n_results]
     return {
         "documents": [[d for _, d, _ in combined]],
         "metadatas": [[m for _, _, m in combined]],
@@ -514,6 +686,7 @@ def query_multi(
     model: str = CLAUDE_MODEL,
     temperature: float = 0.3,
     max_tokens: int = 1024,
+    effort: str = DEFAULT_EFFORT,
 ) -> tuple[str, list[str], list[float]]:
     """
     Query across multiple project collections and synthesise a single answer.
@@ -547,15 +720,17 @@ def query_multi(
     )
 
     client_ai = anthropic.Anthropic(api_key=api_key)
-    message = client_ai.messages.create(
+    message = _create_message(
+        client_ai,
+        fn="query",
         model=model,
         max_tokens=max_tokens,
         temperature=temperature,
+        effort=effort,
         system=system,
         messages=[{"role": "user", "content": build_user_message(question, context)}],
     )
-    _log_usage("query", model, message.usage)
-    return message.content[0].text, citations, scores
+    return _extract_text(message, note_truncation=True), citations, scores
 
 
 def draft_multi(
@@ -566,6 +741,7 @@ def draft_multi(
     model: str = CLAUDE_MODEL,
     temperature: float = 0.4,
     max_tokens: int = 2048,
+    effort: str = DEFAULT_EFFORT,
 ) -> tuple[str, list[str]]:
     """
     Draft a section drawing from multiple project collections.
@@ -593,18 +769,27 @@ def draft_multi(
         raise ValueError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
 
     client_ai = anthropic.Anthropic(api_key=api_key)
-    message = client_ai.messages.create(
+    message = _create_message(
+        client_ai,
+        fn="draft",
         model=model,
         max_tokens=max_tokens,
         temperature=temperature,
+        effort=effort,
         system=system_prompt,
         messages=[{"role": "user", "content": build_user_message(prompt, context)}],
     )
-    _log_usage("draft", model, message.usage)
-    return message.content[0].text, citations
+    return _extract_text(message, note_truncation=True), citations
 
 
-def refine_draft(current_draft: str, instruction: str) -> str:
+def refine_draft(
+    current_draft: str,
+    instruction: str,
+    model: str = CLAUDE_MODEL,
+    temperature: float = 0.3,
+    max_tokens: int = 2048,
+    effort: str = DEFAULT_EFFORT,
+) -> str:
     """
     Revise an existing draft according to a plain-language instruction.
 
@@ -624,15 +809,17 @@ def refine_draft(current_draft: str, instruction: str) -> str:
     user_msg = f"Current draft:\n\n{current_draft}\n\n---\n\nRevision instruction: {instruction}"
 
     client_ai = anthropic.Anthropic(api_key=api_key)
-    message = client_ai.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=2048,
-        temperature=0.3,
+    message = _create_message(
+        client_ai,
+        fn="refine",
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        effort=effort,
         system=REFINE_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_msg}],
     )
-    _log_usage("refine", CLAUDE_MODEL, message.usage)
-    return message.content[0].text
+    return _extract_text(message, note_truncation=True)
 
 
 def extract_themes(project: str, filename: str, model: str = CLAUDE_MODEL) -> dict[str, float]:
@@ -654,7 +841,7 @@ def extract_themes(project: str, filename: str, model: str = CLAUDE_MODEL) -> di
     if not api_key:
         raise ValueError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
 
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    client = get_chroma_client()
     collection = client.get_collection(name=project)
     all_result = collection.get(include=["documents", "metadatas"])
     indices = [
@@ -668,27 +855,18 @@ def extract_themes(project: str, filename: str, model: str = CLAUDE_MODEL) -> di
     context = "\n\n---\n\n".join(all_result["documents"][i] for i in indices[:5])
 
     client_ai = anthropic.Anthropic(api_key=api_key)
-    message = None
-    for attempt in range(2):
-        try:
-            message = client_ai.messages.create(
-                model=model,
-                max_tokens=100,
-                temperature=0.3,
-                system=THEMES_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": context}],
-            )
-            break
-        except anthropic.RateLimitError:
-            if attempt == 0:
-                time.sleep(65)
-            else:
-                raise
-
-    if message is None:
-        return {}
-    _log_usage("extract_themes", model, message.usage)
-    raw = message.content[0].text.strip()
+    message = _create_message(
+        client_ai,
+        fn="extract_themes",
+        model=model,
+        max_tokens=100,
+        temperature=0.3,
+        system=THEMES_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": context}],
+        allow_thinking=False,
+        retry_on_rate_limit=True,
+    )
+    raw = _extract_text(message)
     raw = re.sub(r"^```[a-z]*\n?", "", raw)
     raw = re.sub(r"\n?```$", "", raw).strip()
 
@@ -726,7 +904,7 @@ def annotate_paper(project: str, filename: str) -> str:
     if not api_key:
         raise ValueError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
 
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    client = get_chroma_client()
     if project not in client.list_collections():
         raise ValueError(f"No collection found for project '{project}'.")
 
@@ -745,14 +923,18 @@ def annotate_paper(project: str, filename: str) -> str:
     context = f"Paper: {ref}\n\n" + "\n\n---\n\n".join(docs)
 
     client_ai = anthropic.Anthropic(api_key=api_key)
-    message = client_ai.messages.create(
+    message = _create_message(
+        client_ai,
+        fn="annotate",
         model=CLAUDE_MODEL,
-        max_tokens=400,
+        # 400 truncated the three-section annotation mid-sentence on current models.
+        max_tokens=700,
         system=ANNOTATION_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": context}],
+        allow_thinking=False,
+        retry_on_rate_limit=True,
     )
-    _log_usage("annotate", CLAUDE_MODEL, message.usage)
-    return message.content[0].text
+    return _extract_text(message)
 
 
 def extract_fields_from_paper(
@@ -773,7 +955,7 @@ def extract_fields_from_paper(
     if not api_key:
         raise ValueError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
 
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    client = get_chroma_client()
     collection = client.get_collection(name=project)
     all_result = collection.get(include=["documents", "metadatas"])
     indices = [
@@ -794,27 +976,18 @@ def extract_fields_from_paper(
     )
 
     client_ai = anthropic.Anthropic(api_key=api_key)
-    message = None
-    for attempt in range(2):
-        try:
-            message = client_ai.messages.create(
-                model=CLAUDE_MODEL,
-                max_tokens=512,
-                temperature=0.0,
-                system=EXTRACT_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            break
-        except anthropic.RateLimitError:
-            if attempt == 0:
-                time.sleep(65)
-            else:
-                raise
-
-    if message is None:
-        return {f: "—" for f in fields}
-    _log_usage("extract_fields", CLAUDE_MODEL, message.usage)
-    raw = message.content[0].text.strip()
+    message = _create_message(
+        client_ai,
+        fn="extract_fields",
+        model=CLAUDE_MODEL,
+        max_tokens=512,
+        temperature=0.0,
+        system=EXTRACT_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": prompt}],
+        allow_thinking=False,
+        retry_on_rate_limit=True,
+    )
+    raw = _extract_text(message)
 
     # Strip markdown code fences Claude sometimes adds despite instructions
     raw = re.sub(r"^```[a-z]*\n?", "", raw)
@@ -832,8 +1005,12 @@ def extract_fields_from_paper(
         except json.JSONDecodeError:
             return {f: "parse error" for f in fields}
 
+    if not isinstance(extracted, dict):
+        # Valid JSON but the wrong shape (e.g. a list) — no keys to map to fields.
+        return {f: "parse error" for f in fields}
+
     # Case-insensitive key lookup so capitalisation differences don't break results
-    extracted_ci = {k.lower(): v for k, v in extracted.items()}
+    extracted_ci = {str(k).lower(): v for k, v in extracted.items()}
     return {
         f: str(extracted_ci[f.lower()]) if extracted_ci.get(f.lower()) is not None else "—"
         for f in fields
@@ -850,9 +1027,10 @@ def assist_writing(
     model: str = CLAUDE_MODEL,
     temperature: float = 0.4,
     max_tokens: int = 1024,
+    effort: str = DEFAULT_EFFORT,
 ) -> tuple[str, list[str], list[float]]:
     """
-    Provide AI assistance on a draft in progress.
+    Provide suggestions on a draft in progress.
 
     Retrieves relevant chunks using the first 500 characters of the draft as a query,
     then asks Claude to assist according to the specified mode.
@@ -866,7 +1044,7 @@ def assist_writing(
     Raises:
         ValueError: collection missing/empty or API key not set.
     """
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    client = get_chroma_client()
     existing = client.list_collections()
     if project not in existing:
         raise ValueError(
@@ -911,23 +1089,18 @@ def assist_writing(
     )
 
     client_ai = anthropic.Anthropic(api_key=api_key)
-    for attempt in range(2):
-        try:
-            message = client_ai.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                system=ASSIST_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_msg}],
-            )
-            break
-        except anthropic.RateLimitError:
-            if attempt == 0:
-                time.sleep(65)
-            else:
-                raise
-    _log_usage("write_assist", model, message.usage)
-    return message.content[0].text, citations, scores
+    message = _create_message(
+        client_ai,
+        fn="write_assist",
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        effort=effort,
+        system=ASSIST_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_msg}],
+        retry_on_rate_limit=True,
+    )
+    return _extract_text(message, note_truncation=True), citations, scores
 
 
 def assist_writing_multi(
@@ -940,9 +1113,10 @@ def assist_writing_multi(
     model: str = CLAUDE_MODEL,
     temperature: float = 0.4,
     max_tokens: int = 1024,
+    effort: str = DEFAULT_EFFORT,
 ) -> tuple[str, list[str], list[float]]:
     """
-    Provide AI writing assistance drawing from multiple project collections.
+    Provide writing suggestions drawing from multiple project collections.
 
     Returns:
         (response_text, citations, scores)
@@ -981,23 +1155,18 @@ def assist_writing_multi(
     )
 
     client_ai = anthropic.Anthropic(api_key=api_key)
-    for attempt in range(2):
-        try:
-            message = client_ai.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                system=ASSIST_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_msg}],
-            )
-            break
-        except anthropic.RateLimitError:
-            if attempt == 0:
-                time.sleep(65)
-            else:
-                raise
-    _log_usage("write_assist", model, message.usage)
-    return message.content[0].text, citations, scores
+    message = _create_message(
+        client_ai,
+        fn="write_assist",
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        effort=effort,
+        system=ASSIST_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_msg}],
+        retry_on_rate_limit=True,
+    )
+    return _extract_text(message, note_truncation=True), citations, scores
 
 
 if __name__ == "__main__":

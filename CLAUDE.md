@@ -4,12 +4,12 @@
 A local RAG (Retrieval-Augmented Generation) system for querying academic PDFs and grant proposals using Claude (Anthropic API). Branded as "FFL Knowledge Base" for lab users — avoid "AI" branding in user-facing text. Lab members sync papers from a Zotero library, run ingestion once, then query via CLI or browser UI. The repo folder will be renamed from `lab-ai` to `ffl-knowledge-base` before the first GitHub push.
 
 ## Tech stack
-- **LLM:** Claude (`claude-sonnet-4-6`) via Anthropic API
+- **LLM:** Claude (`claude-sonnet-5` default; Opus 5 and Haiku 4.5 selectable) via Anthropic API
 - **Embeddings:** `sentence-transformers/all-MiniLM-L6-v2` — runs locally, no API cost
 - **Vector DB:** ChromaDB — persisted to `chroma_db/` on disk
 - **PDF parsing:** PyMuPDF (`fitz`)
 - **Zotero sync:** `pyzotero` — pulls PDFs + metadata (title, authors, year, DOI) from a named collection; also scrapes Zotero web-link attachments via `trafilatura`
-- **UI:** Streamlit (seven tabs: Chat, Documents, Draft, Extract, Graph, Guide, Write)
+- **UI:** Streamlit (eight tabs: Chat, Documents, Extract, Draft, Write, Graph, Usage, Guide)
 - **Graph:** `pyvis` — interactive HTML network, embedded via `st.components.v1.html()`
 - **Secrets:** `python-dotenv` loading from `.env`
 
@@ -34,12 +34,17 @@ app.py              Streamlit UI
                     Tab 3 — Draft: 5 writing modes; iterative refinement; multi-project; markdown download
                     Tab 4 — Extract: structured field extraction → table + CSV; persisted to last_extraction.json
                     Tab 5 — Graph: pyvis theme network; paper (blue) + theme (amber) nodes; persisted to themes.json
-                    Tab 6 — Guide: renders USER_GUIDE.md inline
-                    Tab 7 — Write: split-pane markdown editor + live preview; AI assistance (Find
-                             citations, Refine, Challenge, Expand, Custom); writing context brief;
-                             template library; per-project draft persistence; version snapshots;
-                             append-only notes history; DOCX export (pandoc); external file sync
-                    Sidebar: retrieval_k slider (5–25, default 12) for Draft, Extract & Write
+                    Tab 6 — Write: split-pane markdown editor + live preview; suggestion modes
+                             (Find citations, Refine, Challenge, Expand, Custom); writing context
+                             brief; template library; per-project draft persistence; version
+                             snapshots; append-only notes history; DOCX export (pandoc);
+                             external file sync
+                    Tab 7 — Usage: token/cost charts built from usage_log.jsonl (pandas)
+                    Tab 8 — Guide: renders USER_GUIDE.md inline
+                    Sidebar: retrieval_k slider (5–25, default 12) for Draft, Extract & Write;
+                             model selector, temperature, max draft tokens, show-scores toggle;
+                             research memory (cross-session conversation summaries);
+                             session + all-time usage/cost expander
 USER_GUIDE.md       Plain-language guide for lab members
 RUNBOOK.md          Personal quick reference — run commands, common problems, file paths
 projects/
@@ -66,10 +71,40 @@ chroma_db/          Auto-created on first ingest; gitignored; one collection per
 - `query.py` raises `ValueError` (not `sys.exit`) so it can be imported by `app.py` safely
 - Citation format: `[Author et al. (YEAR), p. N]` when Zotero metadata present; falls back to `[filename, p. N]`
 - Web sources cite as `[Author et al. (YEAR) [online]]`
-- Claude is instructed to refuse to answer if the answer isn't in the provided document excerpts
+- Claude is instructed to answer only from the provided excerpts: a partial answer (what the
+  excerpts support + what is missing) when evidence is thin, and the exact sentence
+  "I don't have enough information in the provided documents to answer this question." only when
+  nothing relevant was retrieved. The partial-answer clause is load-bearing — Claude 5 models
+  read SYSTEM_PROMPT rule 4 literally and refuse outright without it
 - Draft mode flags missing literature as `**[GAP: insufficient literature on X — consider adding sources]**`
 - chromadb 0.6 API: `client.list_collections()` returns plain strings (not objects); use directly
+- **One ChromaDB client per process.** Always `query.get_chroma_client()`; never call
+  `chromadb.PersistentClient()` elsewhere (ingest.py is the exception — separate CLI process).
+  Chroma's segment manager and hnswlib are not thread-safe and Streamlit reruns on a new
+  thread each time; per-call clients caused intermittent Windows segfaults with no traceback.
+  Debug a recurrence with `PYTHONFAULTHANDLER=1 streamlit run app.py` to get the native stack.
 - Zotero itemType filter: use `itemType="-attachment"` only, then filter notes in Python code (compound filter causes 400)
+- All Anthropic calls go through `query._create_message()`. Never call
+  `client.messages.create()` directly — the wrapper logs usage, optionally retries once on a
+  429, and normalises three model-specific rules that are all silent failures otherwise:
+  - **`temperature` is dropped** for models that reject sampling parameters (Opus 4.7+ and the
+    Claude 5 family — `NO_TEMPERATURE_MODELS` / `supports_temperature()`). Sending it is a 400.
+  - **Reasoning shares the `max_tokens` budget** on `THINKING_MODELS` (Claude 5 family). A
+    reasoning model given a small budget can spend all of it thinking and return *no text*, so
+    the wrapper adds `THINKING_HEADROOM` when reasoning is on and takes `allow_thinking=False`
+    for short structured replies (themes, field extraction, annotation, memory summaries).
+  - **`output_config.effort`** sets reasoning depth, passed via `extra_body` because the pinned
+    anthropic 0.49.0 has no typed parameter for it. Haiku rejects it (`supports_effort()`).
+- Read response text with `query._extract_text()`, never `message.content[0].text` — on a
+  reasoning model `content[0]` is a `ThinkingBlock` with no `.text` (AttributeError). It also
+  appends a visible notice when `stop_reason == "max_tokens"` (prose calls only, not JSON).
+- Model prices in `app.py` (`_PRICES`, `_TAB_PRICES`) are USD per million tokens and must be
+  kept in sync with each other, the sidebar caption, and USER_GUIDE.md
+- Streamlit: never assign to `st.session_state[k]` when a widget with `key=k` has already been
+  created this run — it raises StreamlitAPIException. The Write tab defers pane switches through
+  `write_rpane_switch_{project}`, applied at the top of the tab before the radio renders.
+- Widgets whose value is persisted to disk must be seeded from the file into their own widget key
+  before rendering, or an empty box will overwrite the saved file on the next save
 
 ## How to run
 ```bash
@@ -124,7 +159,9 @@ Files, embeddings, and chat history stay local. Factor this in for embargoed pap
 - File-based persistence for annotations, extractions, and themes — survive Streamlit restart
 - Multi-project isolation confirmed with Fire and Alaska projects
 - Rate-limit handling — 65 s retry on 429; 7 s inter-paper sleep in Extract and Graph tabs
-- Advanced settings sidebar — model selector (Haiku/Sonnet/Opus), temperature slider, max draft tokens, retrieval-k, show-scores toggle
+- Advanced settings sidebar — model selector (Haiku 4.5 / Sonnet 5 / Opus 5), reasoning-depth
+  selector (shown only for models that accept `effort`), temperature slider (Haiku only —
+  captioned as ignored elsewhere), max draft tokens, retrieval-k, show-scores toggle
 - Retrieval confidence scores — cosine similarity returned alongside citations; optionally shown in Chat source expander
 - Guide tab — renders USER_GUIDE.md inline; covers all tabs and advanced features
 - Temperature defaults: 0.3 for Q&A, 0.4 for drafting (API default is 1.0 — these defaults are a meaningful quality improvement)

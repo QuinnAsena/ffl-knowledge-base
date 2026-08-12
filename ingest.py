@@ -17,6 +17,7 @@ from pathlib import Path
 
 import chromadb
 import fitz  # PyMuPDF
+from chromadb.config import Settings
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 
@@ -89,7 +90,14 @@ def load_project_config(project: str) -> dict:
 
 
 def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
-    """Split text into overlapping word-based chunks."""
+    """Split text into overlapping word-based chunks.
+
+    chunk_size must advance by at least one word per chunk, so an overlap that
+    meets or exceeds it (possible via config.json) is clamped — otherwise the
+    loop below never advances and ingestion hangs.
+    """
+    chunk_size = max(1, chunk_size)
+    overlap = max(0, min(overlap, chunk_size - 1))
     words = text.split()
     chunks = []
     start = 0
@@ -315,7 +323,12 @@ def ingest(project: str, use_zotero: bool = False) -> None:
     print(f"[info] Loading embedding model: {EMBED_MODEL}")
     embed_model = SentenceTransformer(EMBED_MODEL)
 
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    # anonymized_telemetry=False is hygiene only — it does not stop the
+    # "Failed to send telemetry event" spam (chromadb 0.6.3 vs posthog 7.x).
+    client = chromadb.PersistentClient(
+        path=CHROMA_DIR,
+        settings=Settings(anonymized_telemetry=False),
+    )
     collection = client.get_or_create_collection(
         name=project,
         metadata={"hnsw:space": "cosine"},

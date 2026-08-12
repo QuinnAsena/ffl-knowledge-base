@@ -109,6 +109,29 @@ rm projects/Arctic-NSF/themes.json
 **chromadb / embedding errors on first run after new ingest**
 Restart Streamlit — the embedding model download sometimes causes a one-time lag.
 
+**App dies with `Segmentation fault` on startup (Windows only)**
+A native crash inside ChromaDB's hnswlib index — no Python traceback, the process
+just exits. It is intermittent: the same command may work on the second try.
+Known to affect this machine (see the `feature/section-filter` branch note); it does
+not occur on Linux, so the lab server deployment is expected to be immune.
+
+Mitigation already in the code: exactly one ChromaDB client is created per process
+(`query.get_chroma_client()`), because building clients per call across Streamlit's
+per-rerun threads is a thread-safety hazard. **Never** call
+`chromadb.PersistentClient()` anywhere else.
+
+If it recurs, capture a native traceback so the faulting library is identified
+instead of guessed:
+```bash
+PYTHONFAULTHANDLER=1 streamlit run app.py
+```
+On the next crash the C-level stack is printed — it names the library at fault
+(`chroma-hnswlib`, `torch`, or `onnxruntime`). Save that output.
+
+**Console spam: `Failed to send telemetry event ... capture() takes 1 positional argument`**
+Harmless. chromadb 0.6.3 calls an old posthog API and posthog 7.x is installed.
+To silence it: `pip install "posthog<6"` (and pin it in `requirements.txt`).
+
 ---
 
 ## Switching to the lab group Zotero library

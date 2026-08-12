@@ -1,19 +1,19 @@
 ﻿"""
-app.py — Streamlit web UI for the Lab AI RAG system.
+app.py — Streamlit web UI for the FFL Knowledge Base.
 
 Run:
     streamlit run app.py
 """
 
+import csv
+import io
 import json
 import os
 import subprocess
-import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
-import chromadb
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -35,11 +35,14 @@ from query import (
     draft_multi,
     extract_fields_from_paper,
     extract_themes,
+    get_chroma_client,
     get_session_usage,
     query,
     query_multi,
     refine_draft,
     summarise_conversation,
+    supports_effort,
+    supports_temperature,
 )
 
 
@@ -100,7 +103,9 @@ def get_document_index(project: str) -> list[dict]:
     Returns a list of dicts sorted by author/year.
     """
     try:
-        client = chromadb.PersistentClient(path=CHROMA_DIR)
+        # Shared process-wide client — never construct one per call. See
+        # query.get_chroma_client() for why (thread-safety / segfaults).
+        client = get_chroma_client()
         if project not in client.list_collections():
             return []
         collection = client.get_collection(project)
@@ -154,15 +159,28 @@ def get_document_index(project: str) -> list[dict]:
 # ── Theme graph helpers ───────────────────────────────────────────────────────
 
 
+def _read_json(path: Path, default):
+    """Read a JSON file written by this app, tolerating a missing or damaged file.
+
+    These files are rewritten in place, so an interrupted write (or a hand-edit)
+    can leave invalid JSON. Returning the default keeps the tab usable — the next
+    save overwrites the bad file — instead of failing the whole app on every rerun.
+    """
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+        st.warning(f"Could not read `{path.name}` ({exc}) — starting from empty.")
+        return default
+
+
 def _themes_path(project: str) -> Path:
     return Path("projects") / project / "themes.json"
 
 
 def _load_themes(project: str) -> dict:
-    p = _themes_path(project)
-    if p.exists():
-        return json.loads(p.read_text(encoding="utf-8"))
-    return {}
+    return _read_json(_themes_path(project), {})
 
 
 def _save_themes(project: str, themes: dict) -> None:
@@ -292,10 +310,7 @@ def _annotations_path(project: str) -> Path:
 
 
 def _load_annotations(project: str) -> dict:
-    p = _annotations_path(project)
-    if p.exists():
-        return json.loads(p.read_text(encoding="utf-8"))
-    return {}
+    return _read_json(_annotations_path(project), {})
 
 
 def _save_annotations(project: str, annotations: dict) -> None:
@@ -312,10 +327,7 @@ def _memory_path(project: str) -> Path:
 
 
 def _load_memory(project: str) -> list[dict]:
-    p = _memory_path(project)
-    if p.exists():
-        return json.loads(p.read_text(encoding="utf-8"))
-    return []
+    return _read_json(_memory_path(project), [])
 
 
 def _save_memory(project: str, memories: list[dict]) -> None:
@@ -382,10 +394,7 @@ def _extraction_path(project: str) -> Path:
 
 
 def _load_extraction(project: str) -> dict | None:
-    p = _extraction_path(project)
-    if p.exists():
-        return json.loads(p.read_text(encoding="utf-8"))
-    return None
+    return _read_json(_extraction_path(project), None)
 
 
 def _save_extraction(project: str, fields: list, results: list) -> None:
@@ -589,17 +598,17 @@ with st.sidebar:
     st.markdown("---")
     with st.expander("Advanced settings"):
         _model_options = {
-            "Sonnet 4.6 — recommended": "claude-sonnet-4-6",
+            "Sonnet 5 — recommended": "claude-sonnet-5",
             "Haiku 4.5 — fast & lower cost": "claude-haiku-4-5-20251001",
-            "Opus 4.7 — highest quality": "claude-opus-4-7",
+            "Opus 5 — highest quality": "claude-opus-5",
         }
         _model_label = st.selectbox(
             "Claude model",
             list(_model_options.keys()),
             help=(
-                "Sonnet 4.6 is the best balance of quality and cost for most tasks. "
+                "Sonnet 5 is the best balance of quality and cost for most tasks. "
                 "Haiku 4.5 is faster and cheaper — good for quick exploration. "
-                "Opus 4.7 is the most capable — best for final grant drafts at higher cost."
+                "Opus 5 is the most capable — best for final grant drafts at higher cost."
             ),
         )
         claude_model = _model_options[_model_label]
@@ -617,6 +626,34 @@ with st.sidebar:
                 "0.7–1.0 = more creative (outreach writing, brainstorming)."
             ),
         )
+
+        if not supports_temperature(claude_model):
+            st.caption(
+                f"{_model_label.split(' —')[0]} does not accept a temperature setting, "
+                "so this slider is ignored for that model. Use **Reasoning depth** below "
+                "to trade quality against speed and cost."
+            )
+
+        if supports_effort(claude_model):
+            _effort_options = {
+                "Low — fastest, lowest cost": "low",
+                "Medium — balanced": "medium",
+                "High — most thorough": "high",
+            }
+            _effort_label = st.selectbox(
+                "Reasoning depth",
+                list(_effort_options.keys()),
+                index=1,
+                help=(
+                    "How much the model reasons before answering. Reasoning is billed as "
+                    "output, so deeper settings cost more and take longer. Low is well "
+                    "suited to factual questions over the literature; raise it for grant "
+                    "drafting, gap maps, or anything weighing conflicting evidence."
+                ),
+            )
+            reasoning_effort = _effort_options[_effort_label]
+        else:
+            reasoning_effort = None
 
         retrieval_k = st.slider(
             "Passages retrieved (Draft & Extract)",
@@ -652,10 +689,15 @@ with st.sidebar:
         )
 
     _usage = get_session_usage()
+    # USD per million tokens (input, output) — verify at console.anthropic.com.
+    # Superseded models stay listed so past entries in usage_log.jsonl still cost out
+    # at the rate that was actually charged.
     _PRICES = {
-        "claude-haiku-4-5-20251001": (0.80, 4.00),
+        "claude-haiku-4-5-20251001": (1.00, 5.00),
+        "claude-sonnet-5":           (3.00, 15.00),
+        "claude-opus-5":             (5.00, 25.00),
         "claude-sonnet-4-6":         (3.00, 15.00),
-        "claude-opus-4-7":           (15.00, 75.00),
+        "claude-opus-4-7":           (5.00, 25.00),
     }
 
     def _calc_cost(entries):
@@ -692,7 +734,7 @@ with st.sidebar:
                 st.metric("Est. cost", f"${_calc_cost(_all_time):.4f}")
                 st.caption(f"{len(_all_time)} total calls since log started.")
 
-            st.caption("Haiku $0.80/$4 · Sonnet $3/$15 · Opus $15/$75 per M tokens. Verify at console.anthropic.com.")
+            st.caption("Haiku $1/$5 · Sonnet $3/$15 · Opus $5/$25 per M tokens. Verify at console.anthropic.com.")
             if st.button("Reset session counter", key="reset_usage"):
                 clear_session_usage()
                 st.rerun()
@@ -786,12 +828,14 @@ with tab_chat:
                             active_projects_chat, prompt,
                             prior_context=_prior_context,
                             model=claude_model, temperature=temperature,
+                            effort=reasoning_effort,
                         )
                     else:
                         answer, citations, scores = query(
                             selected_project, prompt,
                             prior_context=_prior_context,
                             model=claude_model, temperature=temperature,
+                            effort=reasoning_effort,
                         )
                 except ValueError as e:
                     st.error(str(e))
@@ -1076,11 +1120,13 @@ with tab_draft:
                         draft_text, draft_citations = draft_multi(
                             active_projects_draft, full_prompt, mode["system_prompt"], retrieval_k,
                             model=claude_model, temperature=temperature, max_tokens=max_draft_tokens,
+                            effort=reasoning_effort,
                         )
                     else:
                         draft_text, draft_citations = draft(
                             selected_project, full_prompt, mode["system_prompt"], retrieval_k,
                             model=claude_model, temperature=temperature, max_tokens=max_draft_tokens,
+                            effort=reasoning_effort,
                         )
                 except ValueError as e:
                     st.error(str(e))
@@ -1135,7 +1181,11 @@ with tab_draft:
         if refine_clicked and refine_instruction:
             with st.spinner("Revising draft…"):
                 try:
-                    revised = refine_draft(current_draft, refine_instruction)
+                    revised = refine_draft(
+                        current_draft, refine_instruction,
+                        model=claude_model, temperature=temperature,
+                        max_tokens=max_draft_tokens, effort=reasoning_effort,
+                    )
                     st.session_state[f"draft_text_{selected_project}"] = revised
                     st.rerun()
                 except Exception as exc:
@@ -1149,8 +1199,8 @@ with tab_extract:
     # Load persisted extraction into session state once per project
     _ext_loaded_key = f"_ext_loaded_{selected_project}"
     if _ext_loaded_key not in st.session_state:
-        saved_ext = _load_extraction(selected_project)
-        if saved_ext and f"extract_{selected_project}" not in st.session_state:
+        saved_ext = _load_extraction(selected_project) or {}
+        if saved_ext.get("results") and f"extract_{selected_project}" not in st.session_state:
             st.session_state[f"extract_{selected_project}"] = saved_ext["results"]
         st.session_state[_ext_loaded_key] = True
 
@@ -1209,13 +1259,17 @@ with tab_extract:
         st.dataframe(results, use_container_width=True)
 
         if results:
+            # csv writer handles quotes, commas and newlines inside extracted values —
+            # hand-rolled quoting corrupted any field containing a double quote.
             headers = list(results[0].keys())
-            csv_rows = [",".join(f'"{h}"' for h in headers)]
+            _buf = io.StringIO()
+            _writer = csv.DictWriter(_buf, fieldnames=headers, extrasaction="ignore")
+            _writer.writeheader()
             for row in results:
-                csv_rows.append(",".join(f'"{str(row.get(h, ""))}"' for h in headers))
+                _writer.writerow({h: row.get(h, "") for h in headers})
             st.download_button(
                 "Download as CSV",
-                data="\n".join(csv_rows),
+                data=_buf.getvalue(),
                 file_name=f"{selected_project}_extraction.csv",
                 mime="text/csv",
             )
@@ -1301,9 +1355,11 @@ with tab_usage:
             df["ts"] = pd.to_datetime(df["ts"])
             df["date"] = df["ts"].dt.date
             _TAB_PRICES = {
-                "claude-haiku-4-5-20251001": (0.80, 4.00),
+                "claude-haiku-4-5-20251001": (1.00, 5.00),
+                "claude-sonnet-5":           (3.00, 15.00),
+                "claude-opus-5":             (5.00, 25.00),
                 "claude-sonnet-4-6":         (3.00, 15.00),
-                "claude-opus-4-7":           (15.00, 75.00),
+                "claude-opus-4-7":           (5.00, 25.00),
             }
             df["cost"] = df.apply(
                 lambda r: r["input"]  / 1e6 * _TAB_PRICES.get(r["model"], (3.00, 15.00))[0]
@@ -1373,7 +1429,7 @@ with tab_write:
             "Also draw from",
             other_projects_write,
             default=[],
-            help="Include literature from additional projects when requesting AI assistance.",
+            help="Include literature from additional projects when requesting suggestions.",
             key="extra_write",
         )
 
@@ -1386,6 +1442,7 @@ with tab_write:
     _wkey_cproj   = f"write_cached_proj_{selected_project}"
     _wkey_cctx    = f"write_cached_ctx_{selected_project}"
     _wkey_ctx     = f"write_context_{selected_project}"
+    _wkey_ctxarea = f"write_ctx_area_{selected_project}"
     _wkey_extpath = f"write_ext_path_{selected_project}"
     _wkey_widget  = f"write_textarea_{selected_project}"
     _wkey_pending = f"write_textarea_pending_{selected_project}"
@@ -1404,10 +1461,12 @@ with tab_write:
     if _wkey_pending in st.session_state:
         st.session_state[_wkey_widget] = st.session_state.pop(_wkey_pending)
 
-    # Auto-switch right pane to AI response after a successful call — must happen
-    # before the radio widget renders (same Streamlit constraint as the textarea).
-    if st.session_state.pop(_wkey_rswitch, False):
-        st.session_state[_wkey_rpane] = "AI response"
+    # Pending right-pane switch. Streamlit raises StreamlitAPIException if a widget's
+    # session-state key is written after that widget has been created, so every switch
+    # is requested via _wkey_rswitch and applied here, before the radio renders.
+    _pending_pane = st.session_state.pop(_wkey_rswitch, None)
+    if _pending_pane:
+        st.session_state[_wkey_rpane] = _pending_pane
 
     # Load per-project draft from file on first render
     if _wkey_widget not in st.session_state:
@@ -1416,12 +1475,13 @@ with tab_write:
             _draft_file.read_text(encoding="utf-8") if _draft_file.exists() else ""
         )
 
-    # Load writing context from file on first render
+    # Load writing context from file on first render. The editing box is seeded too —
+    # otherwise it renders empty over a saved brief and "Save context" wipes the file.
     if _wkey_ctx not in st.session_state:
         _ctx_file = _write_context_path(selected_project)
-        st.session_state[_wkey_ctx] = (
-            _ctx_file.read_text(encoding="utf-8") if _ctx_file.exists() else ""
-        )
+        _saved_ctx = _ctx_file.read_text(encoding="utf-8") if _ctx_file.exists() else ""
+        st.session_state[_wkey_ctx] = _saved_ctx
+        st.session_state.setdefault(_wkey_ctxarea, _saved_ctx)
 
     # Load external file path from write_config.json on first render
     if _wkey_extpath not in st.session_state:
@@ -1434,8 +1494,8 @@ with tab_write:
 
     # ── AI bar (above editor) ─────────────────────────────────────────────────
     st.caption(
-        "Ask AI — retrieves relevant passages from the literature, then Claude assists "
-        "with your draft. Set a writing context below to give the AI additional guidance."
+        "Ask Claude — retrieves relevant passages from the literature, then suggests "
+        "improvements to your draft. Set a writing context below for extra guidance."
     )
     _assist_cols = st.columns([1, 1, 1, 1, 3, 1])
     _mode_btn_labels = ["Find citations", "Refine", "Challenge", "Expand"]
@@ -1477,10 +1537,10 @@ with tab_write:
     with col_right:
         # Pane header: label on left, toggle on right
         _rh_left, _rh_right = st.columns([2, 3])
-        _rh_left.caption("Preview / AI response")
+        _rh_left.caption("Preview / suggestion")
         _rpane_view = _rh_right.radio(
             "view",
-            ["Preview", "AI response"],
+            ["Preview", "Suggestion"],
             horizontal=True,
             label_visibility="collapsed",
             key=_wkey_rpane,
@@ -1494,9 +1554,9 @@ with tab_write:
         else:
             # AI response pane
             if st.session_state[_wkey_resp]:
-                _mode_label = st.session_state.get(_wkey_mode, "AI")
+                _mode_label = st.session_state.get(_wkey_mode, "Suggestion")
                 _rp_hdr, _rp_ref, _rp_clr = st.columns([5, 1, 1])
-                _rp_hdr.caption(f"AI — {_mode_label}")
+                _rp_hdr.caption(f"Claude — {_mode_label}")
                 if _rp_ref.button("↺", key=f"write_refresh_{selected_project}",
                                   help="Clear cache and regenerate"):
                     for _k in (_wkey_ctext, _wkey_cmode, _wkey_cctx, _wkey_resp):
@@ -1508,7 +1568,7 @@ with tab_write:
                                   help="Dismiss suggestion"):
                     st.session_state[_wkey_resp]  = ""
                     st.session_state[_wkey_cites] = []
-                    st.session_state[_wkey_rpane] = "Preview"
+                    st.session_state[_wkey_rswitch] = "Preview"
                     st.rerun()
 
                 st.markdown(st.session_state[_wkey_resp])
@@ -1533,17 +1593,17 @@ with tab_write:
                     st.session_state[_wkey_pending] = (
                         draft_text.rstrip() + "\n\n" + st.session_state[_wkey_resp]
                     )
-                    st.session_state[_wkey_rpane] = "Preview"
+                    st.session_state[_wkey_rswitch] = "Preview"
                     st.rerun()
             else:
                 st.markdown(
-                    "*No AI suggestion yet — choose a mode above and click **Ask**.*"
+                    "*No suggestion yet — choose a mode above and click **Ask**.*"
                 )
 
     # ── API call (after columns so draft_text is available) ───────────────────
     if _selected_mode:
         if not draft_text.strip():
-            st.warning("Write something in the editor first, then request AI assistance.")
+            st.warning("Write something in the editor first, then ask for a suggestion.")
         else:
             _write_projects = sorted([selected_project] + write_extra)
             _is_cached = (
@@ -1554,12 +1614,12 @@ with tab_write:
                 and st.session_state[_wkey_resp]
             )
             if _is_cached:
-                st.session_state[_wkey_rpane] = "AI response"
+                st.session_state[_wkey_rswitch] = "Suggestion"
                 st.rerun()
             else:
                 _snapshot_draft(selected_project, draft_text)
                 st.session_state[_wkey_mode] = _selected_mode
-                with st.spinner(f"Asking AI ({_selected_mode})…"):
+                with st.spinner(f"Asking Claude ({_selected_mode})…"):
                     try:
                         if len(_write_projects) > 1:
                             _resp, _cites, _ = assist_writing_multi(
@@ -1571,6 +1631,7 @@ with tab_write:
                                 top_k=retrieval_k,
                                 model=claude_model,
                                 temperature=temperature,
+                                effort=reasoning_effort,
                             )
                         else:
                             _resp, _cites, _ = assist_writing(
@@ -1582,6 +1643,7 @@ with tab_write:
                                 top_k=retrieval_k,
                                 model=claude_model,
                                 temperature=temperature,
+                                effort=reasoning_effort,
                             )
                         st.session_state[_wkey_resp]  = _resp
                         st.session_state[_wkey_cites] = _cites
@@ -1590,10 +1652,10 @@ with tab_write:
                         st.session_state[_wkey_cproj] = _write_projects
                         st.session_state[_wkey_cctx]  = writing_context
                         # Signal the right pane to switch on next render
-                        st.session_state[_wkey_rswitch] = True
+                        st.session_state[_wkey_rswitch] = "Suggestion"
                     except Exception as e:
                         st.session_state[_wkey_resp] = f"**Error:** {e}"
-                        st.session_state[_wkey_rswitch] = True
+                        st.session_state[_wkey_rswitch] = "Suggestion"
                 st.rerun()
 
     st.divider()
@@ -1658,7 +1720,7 @@ with tab_write:
             st.success("Draft saved.")
 
     st.caption(
-        f"Snapshots auto-saved before each AI call → "
+        f"Snapshots auto-saved before each request → "
         f"`projects/{selected_project}/write_snapshots/`"
     )
 
@@ -1668,8 +1730,8 @@ with tab_write:
         expanded=False,
     ):
         st.caption(
-            "Brief for the AI — audience, core argument, style constraints, things to avoid. "
-            "Saved per project and injected into every AI assist call."
+            "Brief for Claude — audience, core argument, style constraints, things to avoid. "
+            "Saved per project and included with every suggestion request."
         )
         _ctx_area = st.text_area(
             "context",
@@ -1681,7 +1743,7 @@ with tab_write:
                 "Data is correlational — avoid causal language."
             ),
             label_visibility="collapsed",
-            key=f"write_ctx_area_{selected_project}",
+            key=_wkey_ctxarea,
         )
         if st.button("Save context", key=f"write_save_ctx_{selected_project}"):
             _write_context_path(selected_project).parent.mkdir(parents=True, exist_ok=True)
@@ -1758,13 +1820,13 @@ with tab_write:
 
                 if _ec3.button("Save suggestion to file", key=f"write_ext_notes_{selected_project}"):
                     if not st.session_state.get(_wkey_resp):
-                        st.warning("No AI suggestion to save yet.")
+                        st.warning("No suggestion to save yet.")
                     else:
                         try:
                             _notes_ext = _ext.with_name(_ext.stem + ".notes.md")
                             _append_to_notes(
                                 _notes_ext,
-                                mode=st.session_state.get(_wkey_mode, "AI"),
+                                mode=st.session_state.get(_wkey_mode, "Suggestion"),
                                 response=st.session_state[_wkey_resp],
                                 draft_snippet=draft_text,
                             )

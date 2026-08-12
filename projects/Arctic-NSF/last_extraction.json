@@ -1,0 +1,105 @@
+{
+  "fields": [
+    "study region",
+    "spatial scale",
+    "target species"
+  ],
+  "results": [
+    {
+      "Paper": "Abatzoglou et al. (2025)",
+      "study region": "Global forested regions, with case studies in SE Asia, Amazon, Siberia, Mediterranean, SE Australia, Western US, Chile, and Canada",
+      "spatial scale": "Global (forested ecoregions worldwide)",
+      "target species": "\u2014"
+    },
+    {
+      "Paper": "Lara et al. (2025)",
+      "study region": "Alaska",
+      "spatial scale": "20 m spatial resolution, wall-to-wall ~1.5 million km\u00b2",
+      "target species": "peatlands (bogs, fens, marshes, meadows, tundra wetlands)"
+    },
+    {
+      "Paper": "Rammer et al. (2024)",
+      "study region": "\u2014",
+      "spatial scale": "from individual trees to landscapes of 10^5 hectares",
+      "target species": "forest trees (individual trees simulated across forest ecosystems)"
+    },
+    {
+      "Paper": "Thom et al. (2024)",
+      "study region": "Europe, North America, and Asia (Northern Hemisphere)",
+      "spatial scale": "multiple spatial scales (individual-tree level to forest landscape)",
+      "target species": "150 temperate and boreal tree species and provenances"
+    },
+    {
+      "Paper": "Hansen et al. (2023)",
+      "study region": "interior Alaska",
+      "spatial scale": "stands (1 ha) to landscapes (61,000 ha)",
+      "target species": "\u2014"
+    },
+    {
+      "Paper": "Mack et al. (2021)",
+      "study region": "Interior Alaska, USA",
+      "spatial scale": "250,000 km\u00b2 region",
+      "target species": "['black spruce (Picea mariana)', 'aspen (Populus tremuloides)', 'birch (Betula neoalaskana)']"
+    },
+    {
+      "Paper": "Baltzer et al. (2021)",
+      "study region": "boreal North America",
+      "spatial scale": "continent-wide (1,538 field sites across boreal North America, 637 million ha of forested land)",
+      "target species": "black spruce (Picea mariana)"
+    },
+    {
+      "Paper": "Hansen et al. (2021)",
+      "study region": "interior Alaska, USA (North American boreal biome)",
+      "spatial scale": "regional (~450,000 km\u00b2)",
+      "target species": "['black spruce (Picea mariana)', 'trembling aspen (Populus tremuloides)', 'Alaskan birch (Betula neoalaskana)']"
+    },
+    {
+      "Paper": "Johnstone et al. (2020)",
+      "study region": "Interior Alaska, USA (boreal forests north of the Alaska Range and south of the Brooks Range)",
+      "spatial scale": "Landscape scale (89 plots across multiple large burn complexes along a broad N\u2013S gradient)",
+      "target species": "['Picea mariana (black spruce)', 'Betula neoalaskana (Alaskan paper birch)', 'Populus tremuloides (trembling aspen)', 'Picea glauca (white spruce)', 'Populus balsamifera (balsam poplar)']"
+    },
+    {
+      "Paper": "Wang et al. (2020)",
+      "study region": "Arctic\u2013Boreal Northwestern North America (Alaska and western Canada), specifically the NASA ABoVE Core Study Domain",
+      "spatial scale": "4.7 \u00d7 10^6 km\u00b2, analyzed at 30 m spatial resolution",
+      "target species": "\u2014"
+    },
+    {
+      "Paper": "Hart et al. (2019)",
+      "study region": "Boreal Shield of Saskatchewan, Canada",
+      "spatial scale": "landscape",
+      "target species": "['black spruce (Picea mariana)', 'jack pine (Pinus spp.)', 'aspen (Populus tremuloides)', 'birch (Betula spp.)']"
+    },
+    {
+      "Paper": "Wheatcroft (2019)",
+      "study region": "\u2014",
+      "spatial scale": "\u2014",
+      "target species": "\u2014"
+    },
+    {
+      "Paper": "Johnstone et al. (2016)",
+      "study region": "North America (primarily), with examples including New Zealand",
+      "spatial scale": "stand, ecosystem, and landscape scales",
+      "target species": "\u2014"
+    },
+    {
+      "Paper": "Mann et al. (2012)",
+      "study region": "Interior Alaska, USA",
+      "spatial scale": "regional",
+      "target species": "['black spruce (Picea mariana)', 'white spruce (Picea glauca)', 'aspen (Populus tremuloides)', 'birch (Betula neoalaskana)']"
+    },
+    {
+      "Paper": "Nitschke et al. (2008)",
+      "study region": "interior Douglas-fir ecosystem in south-central British Columbia, Canada",
+      "spatial scale": "individual tree to ecosystem (aspatial model)",
+      "target species": "tree species within the interior Douglas-fir ecosystem (multiple tree species assessed for regeneration niche response to climate change)"
+    },
+    {
+      "Paper": "GRKL6INN.web",
+      "study region": "\u2014",
+      "spatial scale": "\u2014",
+      "target species": "\u2014"
+    }
+  ]
+}
